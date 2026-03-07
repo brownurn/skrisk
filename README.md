@@ -27,6 +27,7 @@ skrisk serve --host 127.0.0.1 --port 8080
 
 cd frontend
 npm install
+npm run build
 PUBLIC_SKRISK_API_BASE_URL=http://127.0.0.1:8080 npm run dev
 ```
 
@@ -41,7 +42,7 @@ SK Risk reads backend settings from the local shell environment or `.envrc`.
 
 ## Frontend
 
-The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. The current routes are:
+The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. `skrisk serve` serves the built SPA from `frontend/build`, while `npm run dev` is available for local UI work. The current routes are:
 
 - `/`: overview and feed activity
 - `/skills`: searchable evidence queue

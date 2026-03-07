@@ -659,7 +659,7 @@ class SkillRepository:
         daily_budget: int,
         now: datetime | None = None,
     ) -> dict:
-        queue_items = await self.list_vt_queue_items()
+        queue_items = await self.list_vt_queue_items(status="queued")
         used_today = await self.count_indicator_enrichments_today(provider="virustotal", now=now)
         return {
             "daily_budget": daily_budget,

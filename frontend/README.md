@@ -19,6 +19,14 @@ PUBLIC_SKRISK_API_BASE_URL=http://127.0.0.1:8080 npm run dev
 
 If the backend is running on the default local address, the app will query `http://127.0.0.1:8080`.
 
+To make the FastAPI backend serve the analyst UI directly:
+
+```sh
+npm run build
+```
+
+This writes the static SPA to `frontend/build`, which `skrisk serve` uses for `/` and deep-link routes.
+
 ## Verification
 
 ```sh

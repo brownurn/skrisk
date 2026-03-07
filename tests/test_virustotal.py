@@ -169,3 +169,45 @@ async def test_vt_triage_can_limit_batch_size(tmp_path: Path) -> None:
     assert summary["lookups_completed"] == 1
     assert queue_items[0]["status"] == "completed"
     assert queue_items[1]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_vt_queue_status_only_counts_pending_items(tmp_path: Path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}",
+        archive_root=tmp_path / "archive",
+        vt_daily_budget=4,
+        vt_api_key="test-key",
+    )
+    session_factory = create_sqlite_session_factory(settings.database_url)
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+
+    queued_id = await repository.enqueue_vt_lookup(
+        indicator_type="domain",
+        indicator_value="queued.example",
+        priority=80,
+        reason="critical",
+    )
+    completed_id = await repository.enqueue_vt_lookup(
+        indicator_type="domain",
+        indicator_value="done.example",
+        priority=40,
+        reason="reviewed",
+    )
+    await repository.update_vt_queue_item(queue_item_id=completed_id, status="completed")
+
+    status = await repository.get_vt_queue_status(daily_budget=settings.vt_daily_budget)
+
+    assert status["queue_items"] == [
+        {
+            "id": queued_id,
+            "indicator_id": status["queue_items"][0]["indicator_id"],
+            "indicator_type": "domain",
+            "indicator_value": "queued.example",
+            "priority": 80,
+            "reason": "critical",
+            "status": "queued",
+            "attempt_count": 0,
+        }
+    ]
