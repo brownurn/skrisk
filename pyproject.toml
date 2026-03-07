@@ -1,0 +1,44 @@
+[project]
+name = "skrisk"
+version = "0.1.0"
+description = "Skills Risk intelligence platform for collecting and analyzing AI agent skills"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "Melurna" }
+]
+keywords = ["skills", "security", "malware", "ai-agents", "risk", "analysis"]
+dependencies = [
+    "aiosqlite>=0.20.0",
+    "apscheduler>=3.10.4",
+    "click>=8.1.7",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.4",
+    "pydantic>=2.10.6",
+    "sqlalchemy[asyncio]>=2.0.38",
+    "tldextract>=5.1.3",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.3",
+]
+
+[project.scripts]
+skrisk = "skrisk.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skrisk"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+

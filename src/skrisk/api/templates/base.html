@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}SK Risk{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-stone-950 text-stone-100">
+  <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    <header class="mb-10 border-b border-stone-800 pb-6">
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <a href="/" class="text-xs font-semibold uppercase tracking-[0.35em] text-amber-400">SK Risk</a>
+          <h1 class="mt-2 text-3xl font-semibold tracking-tight text-white">Skills Risk Intelligence</h1>
+          <p class="mt-2 max-w-2xl text-sm text-stone-400">Continuous collection, historical diffing, and malware-oriented analysis for AI agent skills.</p>
+        </div>
+        <nav class="flex gap-3 text-sm text-stone-400">
+          <a href="/" class="rounded-full border border-stone-800 px-4 py-2 hover:border-amber-400 hover:text-white">Dashboard</a>
+        </nav>
+      </div>
+    </header>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>
+

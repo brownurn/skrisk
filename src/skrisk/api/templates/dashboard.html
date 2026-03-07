@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard · SK Risk{% endblock %}
+
+{% block content %}
+<section class="grid gap-4 md:grid-cols-4">
+  <div class="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
+    <p class="text-xs uppercase tracking-[0.25em] text-stone-500">Tracked Repos</p>
+    <p class="mt-3 text-3xl font-semibold">{{ stats.tracked_repos }}</p>
+  </div>
+  <div class="rounded-3xl border border-stone-800 bg-stone-900/70 p-5">
+    <p class="text-xs uppercase tracking-[0.25em] text-stone-500">Tracked Skills</p>
+    <p class="mt-3 text-3xl font-semibold">{{ stats.tracked_skills }}</p>
+  </div>
+  <div class="rounded-3xl border border-red-900/70 bg-red-950/30 p-5">
+    <p class="text-xs uppercase tracking-[0.25em] text-red-400">Critical Skills</p>
+    <p class="mt-3 text-3xl font-semibold text-red-300">{{ stats.critical_skills }}</p>
+  </div>
+  <div class="rounded-3xl border border-amber-900/70 bg-amber-950/30 p-5">
+    <p class="text-xs uppercase tracking-[0.25em] text-amber-400">High Risk</p>
+    <p class="mt-3 text-3xl font-semibold text-amber-300">{{ stats.high_risk_skills }}</p>
+  </div>
+</section>
+
+<section class="mt-10 rounded-3xl border border-stone-800 bg-stone-900/60">
+  <div class="flex items-center justify-between border-b border-stone-800 px-6 py-4">
+    <div>
+      <h2 class="text-lg font-semibold text-white">Critical Skills</h2>
+      <p class="text-sm text-stone-400">Latest snapshots with critical risk scores.</p>
+    </div>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-stone-800 text-sm">
+      <thead class="bg-stone-950/40 text-left text-xs uppercase tracking-[0.2em] text-stone-500">
+        <tr>
+          <th class="px-6 py-3">Skill</th>
+          <th class="px-6 py-3">Severity</th>
+          <th class="px-6 py-3">Score</th>
+          <th class="px-6 py-3">Domains</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-stone-800">
+        {% for skill in top_skills %}
+        <tr class="hover:bg-stone-900/80">
+          <td class="px-6 py-4">
+            <a class="font-medium text-amber-300 hover:text-amber-200" href="/skills/{{ skill.publisher }}/{{ skill.repo }}/{{ skill.skill_slug }}">{{ skill.publisher }}/{{ skill.repo }}/{{ skill.skill_slug }}</a>
+          </td>
+          <td class="px-6 py-4">{{ skill.latest_snapshot.risk_report.severity }}</td>
+          <td class="px-6 py-4">{{ skill.latest_snapshot.risk_report.score }}</td>
+          <td class="px-6 py-4">{{ ", ".join(skill.latest_snapshot.extracted_domains) }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td class="px-6 py-10 text-stone-500" colspan="4">No skills have been collected yet.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+
