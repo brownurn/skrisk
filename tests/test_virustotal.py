@@ -131,3 +131,41 @@ async def test_vt_triage_marks_lookup_failures_and_continues(tmp_path: Path) -> 
     assert queue_items[1]["status"] == "completed"
     assert url_detail["enrichments"] == []
     assert any(enrichment["provider"] == "virustotal" for enrichment in domain_detail["enrichments"])
+
+
+@pytest.mark.asyncio
+async def test_vt_triage_can_limit_batch_size(tmp_path: Path) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}",
+        archive_root=tmp_path / "archive",
+        vt_daily_budget=4,
+        vt_api_key="test-key",
+    )
+    session_factory = create_sqlite_session_factory(settings.database_url)
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+
+    await repository.enqueue_vt_lookup(
+        indicator_type="url",
+        indicator_value="https://bad.example/a.sh",
+        priority=100,
+        reason="critical",
+    )
+    await repository.enqueue_vt_lookup(
+        indicator_type="domain",
+        indicator_value="bad.example",
+        priority=90,
+        reason="abusech-hit",
+    )
+
+    summary = await VTTriageService(
+        session_factory=session_factory,
+        settings=settings,
+        client=FakeVTClient(),
+    ).run_once(limit=1)
+
+    queue_items = await repository.list_vt_queue_items()
+
+    assert summary["lookups_completed"] == 1
+    assert queue_items[0]["status"] == "completed"
+    assert queue_items[1]["status"] == "queued"

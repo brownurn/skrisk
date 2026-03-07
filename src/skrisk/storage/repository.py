@@ -552,11 +552,17 @@ class SkillRepository:
                 for _, _, snapshot_row in latest_rows
                 if (snapshot_row.risk_report or {}).get("severity") in {"critical", "high"}
             )
+            intel_backed_findings = sum(
+                1
+                for _, _, snapshot_row in latest_rows
+                if (snapshot_row.risk_report or {}).get("indicator_matches")
+            )
             return {
                 "tracked_repos": int(tracked_repos or 0),
                 "tracked_skills": int(tracked_skills or 0),
                 "critical_skills": int(critical_skills or 0),
                 "high_risk_skills": int(high_risk_skills or 0),
+                "intel_backed_findings": int(intel_backed_findings or 0),
             }
 
     async def list_skills(
@@ -573,7 +579,8 @@ class SkillRepository:
                     for row in rows
                     if (row[2].risk_report or {}).get("severity") == severity
                 ]
-            rows = rows[:limit]
+            if limit > 0:
+                rows = rows[:limit]
             return [
                 {
                     "publisher": repo_row.publisher,

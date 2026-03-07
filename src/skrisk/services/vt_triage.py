@@ -22,7 +22,7 @@ class VTTriageService:
             VirusTotalClient(settings.vt_api_key) if settings.vt_api_key else None
         )
 
-    async def run_once(self) -> dict[str, int]:
+    async def run_once(self, *, limit: int | None = None) -> dict[str, int]:
         if self._client is None:
             raise ValueError("VT_APIKEY is required to run VT triage")
 
@@ -39,6 +39,9 @@ class VTTriageService:
         skipped_budget = 0
 
         for queue_item in queue_items:
+            if limit is not None and completed + failed >= limit:
+                break
+
             if remaining_budget <= 0:
                 skipped_budget += 1
                 continue

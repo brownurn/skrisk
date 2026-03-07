@@ -46,6 +46,13 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
             "severity": "critical",
             "score": 95,
             "categories": ["remote_code_execution"],
+            "indicator_matches": [
+                {
+                    "indicator_type": "domain",
+                    "indicator_value": "cli.inference.sh",
+                    "observations": [],
+                }
+            ],
         },
     )
     await repository.record_external_verdict(
@@ -71,6 +78,7 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
     assert "agent-tools" in dashboard_response.text
     assert stats_response.status_code == 200
     assert stats_response.json()["critical_skills"] == 1
+    assert stats_response.json()["intel_backed_findings"] == 1
     assert stats_response.json()["tracked_repos"] == 1
 
     assert detail_response.status_code == 200
@@ -102,3 +110,54 @@ async def test_app_factory_initializes_database_from_env(tmp_path, monkeypatch) 
 
     assert response.status_code == 200
     assert response.json()["tracked_repos"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_skills_limit_zero_returns_full_registry(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'all-skills.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="melurna",
+        repo="skill-pack",
+        source_url="https://github.com/melurna/skill-pack",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=2,
+    )
+
+    for skill_slug in ("alpha", "beta"):
+        skill_id = await repository.upsert_skill(
+            repo_id=repo_id,
+            skill_slug=skill_slug,
+            title=skill_slug,
+            relative_path=f"skills/{skill_slug}",
+            registry_url=f"https://skills.sh/melurna/skill-pack/{skill_slug}",
+        )
+        await repository.record_skill_snapshot(
+            skill_id=skill_id,
+            repo_snapshot_id=repo_snapshot_id,
+            folder_hash=f"hash-{skill_slug}",
+            version_label="main@abc123",
+            skill_text="echo safe",
+            referenced_files=["SKILL.md"],
+            extracted_domains=[],
+            risk_report={"severity": "none", "score": 0},
+        )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/skills?limit=0")
+
+    assert response.status_code == 200
+    assert {item["skill_slug"] for item in response.json()} == {"alpha", "beta"}

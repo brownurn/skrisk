@@ -12,6 +12,7 @@ from skrisk.config import load_settings
 from skrisk.scheduler import next_scan_time
 from skrisk.services.intel_sync import AbuseChSyncService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySyncService, SkillsShClient
+from skrisk.services.vt_triage import VTTriageService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
 
 
@@ -102,6 +103,34 @@ def sync_intel_command(provider: str) -> None:
         )
 
     asyncio.run(_run())
+
+
+@cli.command("enrich-vt")
+@click.option("--limit", default=25, show_default=True, type=click.IntRange(min=1))
+def enrich_vt_command(limit: int) -> None:
+    """Process a bounded batch of queued VirusTotal lookups."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.archive_root.mkdir(parents=True, exist_ok=True)
+
+        summary = await VTTriageService(
+            session_factory=session_factory,
+            settings=settings,
+        ).run_once(limit=limit)
+        click.echo(
+            f"{summary['lookups_completed']} VT lookups completed, "
+            f"{summary['lookups_failed']} failed, "
+            f"{summary['lookups_skipped_budget']} skipped for budget"
+        )
+
+    try:
+        asyncio.run(_run())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("serve")
