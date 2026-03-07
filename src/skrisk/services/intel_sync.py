@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -117,6 +118,23 @@ class AbuseChSyncService:
             archive_sha256=archive_result.archive_sha256,
             archive_size_bytes=len(raw_bytes),
         )
+        await self._repository.record_intel_feed_artifact(
+            feed_run_id=feed_run_id,
+            artifact_type="raw-archive",
+            relative_path=self._relative_archive_path(archive_result.archive_path),
+            sha256=archive_result.archive_sha256,
+            size_bytes=archive_result.archive_path.stat().st_size,
+            content_type="application/zip",
+        )
+        manifest_bytes = archive_result.manifest_path.read_bytes()
+        await self._repository.record_intel_feed_artifact(
+            feed_run_id=feed_run_id,
+            artifact_type="manifest",
+            relative_path=self._relative_archive_path(archive_result.manifest_path),
+            sha256=sha256(manifest_bytes).hexdigest(),
+            size_bytes=len(manifest_bytes),
+            content_type="application/json",
+        )
 
         indicators_upserted = 0
         observations_recorded = 0
@@ -160,3 +178,6 @@ class AbuseChSyncService:
             / fetched_at.strftime("%d")
             / timestamp
         )
+
+    def _relative_archive_path(self, path: Path) -> str:
+        return path.relative_to(self._settings.archive_root).as_posix()

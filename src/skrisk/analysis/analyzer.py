@@ -180,12 +180,13 @@ class SkillAnalyzer:
         indicator_matches: list[dict],
         change_score: int = 0,
     ) -> dict[str, object]:
-        intel_score = _intel_score(indicator_matches)
+        positive_matches = [match for match in indicator_matches if _is_positive_indicator_match(match)]
+        intel_score = _intel_score(positive_matches)
         total_score = min(100, report.behavior_score + intel_score + change_score)
         severity = _severity_from_score(total_score)
         confidence = _confidence_label(
             behavior_score=report.behavior_score,
-            indicator_matches=indicator_matches,
+            indicator_matches=positive_matches,
             severity=severity,
         )
         return {
@@ -299,3 +300,46 @@ def _host_indicator_type(value: str) -> str:
     except ValueError:
         return "domain"
     return "ip"
+
+
+def _is_positive_indicator_match(match: dict) -> bool:
+    return any(_is_positive_observation(observation) for observation in match.get("observations", []))
+
+
+def _is_positive_observation(observation: dict) -> bool:
+    classification = (observation.get("classification") or "").lower()
+    confidence = (observation.get("confidence_label") or "").lower()
+    summary = (observation.get("summary") or "").lower()
+    combined = " ".join(part for part in (classification, summary) if part)
+
+    if any(
+        marker in combined
+        for marker in (
+            "benign",
+            "harmless",
+            "false positive",
+            "informational",
+        )
+    ):
+        return False
+
+    if any(
+        marker in combined
+        for marker in (
+            "malicious",
+            "malware",
+            "payload",
+            "stealer",
+            "trojan",
+            "botnet",
+            "phish",
+            "exploit",
+            "ransom",
+            "c2",
+            "download",
+            "loader",
+        )
+    ):
+        return True
+
+    return confidence == "high"

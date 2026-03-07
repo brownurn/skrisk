@@ -77,6 +77,7 @@ async def ingest_local_checkout(
             repository=repository,
             report=report,
         )
+        previous_indicator_ids = await repository.get_latest_indicator_ids_for_skill(skill_id=skill_id)
         risk_report = analyzer.build_risk_report(
             report=report,
             indicator_matches=indicator_matches,
@@ -95,6 +96,7 @@ async def ingest_local_checkout(
             repository=repository,
             skill_snapshot_id=skill_snapshot_id,
             linked_indicators=linked_indicators,
+            previous_indicator_ids=previous_indicator_ids,
         )
         await _enqueue_vt_candidates(
             repository=repository,
@@ -158,6 +160,7 @@ async def _record_skill_indicator_links(
     repository: SkillRepository,
     skill_snapshot_id: int,
     linked_indicators: list[tuple[object, int]],
+    previous_indicator_ids: set[int],
 ) -> None:
     for indicator, indicator_id in linked_indicators:
         await repository.record_skill_indicator_link(
@@ -166,7 +169,7 @@ async def _record_skill_indicator_links(
             source_path=indicator.path,
             extraction_kind=indicator.extraction_kind,
             raw_value=indicator.raw_value,
-            is_new_in_snapshot=True,
+            is_new_in_snapshot=indicator_id not in previous_indicator_ids,
         )
 
 

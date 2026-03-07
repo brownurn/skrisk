@@ -7,12 +7,14 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import selectinload
 
 from skrisk.storage.models import (
     ExternalVerdict,
     Indicator,
     IndicatorEnrichment,
     IndicatorObservation,
+    IntelFeedArtifact,
     IntelFeedRun,
     Skill,
     SkillIndicatorLink,
@@ -49,6 +51,30 @@ class SkillRepository:
                 parser_version=parser_version,
                 archive_sha256=archive_sha256,
                 archive_size_bytes=archive_size_bytes,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def record_intel_feed_artifact(
+        self,
+        *,
+        feed_run_id: int,
+        artifact_type: str,
+        relative_path: str,
+        sha256: str,
+        size_bytes: int,
+        content_type: str | None,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = IntelFeedArtifact(
+                feed_run_id=feed_run_id,
+                artifact_type=artifact_type,
+                relative_path=relative_path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+                content_type=content_type,
             )
             session.add(row)
             await session.commit()
@@ -151,6 +177,20 @@ class SkillRepository:
             await session.commit()
             await session.refresh(row)
             return row.id
+
+    async def get_latest_indicator_ids_for_skill(self, *, skill_id: int) -> set[int]:
+        async with self._session_factory() as session:
+            latest_snapshot_id = await session.scalar(
+                select(func.max(SkillSnapshot.id)).where(SkillSnapshot.skill_id == skill_id)
+            )
+            if latest_snapshot_id is None:
+                return set()
+
+            result = await session.execute(
+                select(SkillIndicatorLink.indicator_id)
+                .where(SkillIndicatorLink.skill_snapshot_id == latest_snapshot_id)
+            )
+            return set(result.scalars().all())
 
     async def record_indicator_enrichment(
         self,
@@ -556,6 +596,7 @@ class SkillRepository:
         async with self._session_factory() as session:
             result = await session.execute(
                 select(IntelFeedRun)
+                .options(selectinload(IntelFeedRun.artifacts))
                 .order_by(IntelFeedRun.id.desc())
                 .limit(limit)
             )
@@ -567,6 +608,17 @@ class SkillRepository:
                     "feed_name": row.feed_name,
                     "source_url": row.source_url,
                     "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "artifacts": [
+                        {
+                            "id": artifact.id,
+                            "artifact_type": artifact.artifact_type,
+                            "relative_path": artifact.relative_path,
+                            "sha256": artifact.sha256,
+                            "size_bytes": artifact.size_bytes,
+                            "content_type": artifact.content_type,
+                        }
+                        for artifact in sorted(row.artifacts, key=lambda item: item.id)
+                    ],
                 }
                 for row in rows
             ]

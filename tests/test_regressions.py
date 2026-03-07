@@ -12,6 +12,7 @@ from skrisk.collectors.skills_sh import AuditRow, SkillSitemapEntry
 from skrisk.services.sync import RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
 from skrisk.storage.models import SkillRepoSnapshot, SkillSnapshot
+from skrisk.storage.repository import SkillRepository
 
 
 def test_discover_skills_in_checkout_supports_root_and_plugin_manifest(tmp_path: Path) -> None:
@@ -106,8 +107,19 @@ async def test_registry_sync_allows_repeated_rescans_of_unchanged_skill(tmp_path
 
     async with session_factory() as session:
         snapshot_count = await session.scalar(select(func.count()).select_from(SkillSnapshot))
+    repository = SkillRepository(session_factory)
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
 
     assert snapshot_count == 2
+    assert detail is not None
+    latest_snapshot = detail["latest_snapshot"]
+    assert latest_snapshot is not None
+    assert latest_snapshot["indicator_links"]
+    assert all(not link["is_new_in_snapshot"] for link in latest_snapshot["indicator_links"])
 
 
 @pytest.mark.asyncio
