@@ -93,82 +93,105 @@ class RegistrySyncService:
             (row.publisher, row.repo, row.skill_slug): row
             for row in audit_rows
         }
-        repo_skill_counts = Counter((entry.publisher, entry.repo) for entry in sitemap_entries)
-        seen_repos: set[tuple[str, str]] = set()
-
+        repo_groups: dict[tuple[str, str], list[SkillSitemapEntry]] = {}
         for entry in sitemap_entries:
-            audit_row = audit_map.get((entry.publisher, entry.repo, entry.skill_slug))
+            repo_groups.setdefault((entry.publisher, entry.repo), []).append(entry)
+
+        seen_repos: set[tuple[str, str]] = set()
+        skills_succeeded = 0
+        skills_failed = 0
+
+        for (publisher, repo), repo_entries in repo_groups.items():
+            ranked_rows = [
+                audit_map[(publisher, repo, entry.skill_slug)].rank
+                for entry in repo_entries
+                if (publisher, repo, entry.skill_slug) in audit_map
+            ]
             repo_id = await self._repository.upsert_skill_repo(
-                publisher=entry.publisher,
-                repo=entry.repo,
-                source_url=f"https://github.com/{entry.publisher}/{entry.repo}",
-                registry_rank=audit_row.rank if audit_row is not None else None,
+                publisher=publisher,
+                repo=repo,
+                source_url=f"https://github.com/{publisher}/{repo}",
+                registry_rank=min(ranked_rows) if ranked_rows else None,
             )
-            seen_repos.add((entry.publisher, entry.repo))
+            seen_repos.add((publisher, repo))
 
-            commit_sha, files = await skill_loader(entry)
-            repo_snapshot_id = await self._repository.record_repo_snapshot(
-                repo_id=repo_id,
-                commit_sha=commit_sha,
-                default_branch="main",
-                discovered_skill_count=repo_skill_counts[(entry.publisher, entry.repo)],
-            )
-            skill_id = await self._repository.upsert_skill(
-                repo_id=repo_id,
-                skill_slug=entry.skill_slug,
-                title=audit_row.name if audit_row is not None else entry.skill_slug,
-                relative_path=f"skills/{entry.skill_slug}",
-                registry_url=entry.url,
-            )
+            repo_snapshot_id: int | None = None
+            repo_commit_sha: str | None = None
 
-            report = self._analyzer.analyze_skill(
-                publisher=entry.publisher,
-                repo=entry.repo,
-                skill_slug=entry.skill_slug,
-                files=files,
-            )
-            risk_report = {
-                "severity": report.severity,
-                "score": report.score,
-                "categories": [finding.category for finding in report.findings],
-                "domains": report.domains,
-                "findings": [
-                    {
-                        "path": finding.path,
-                        "category": finding.category,
-                        "severity": finding.severity,
-                        "evidence": finding.evidence,
-                    }
-                    for finding in report.findings
-                ],
-            }
-            await self._repository.record_skill_snapshot(
-                skill_id=skill_id,
-                repo_snapshot_id=repo_snapshot_id,
-                folder_hash=compute_folder_hash(files),
-                version_label=f"main@{commit_sha}",
-                skill_text=files.get("SKILL.md", ""),
-                referenced_files=sorted(files),
-                extracted_domains=report.domains,
-                risk_report=risk_report,
-            )
-
-            if audit_row is None:
-                await self._repository.mark_repo_scanned(repo_id=repo_id)
-                continue
-            for partner in audit_row.partners.values():
-                if partner.verdict is None and partner.alert_count == 0:
+            for entry in repo_entries:
+                audit_row = audit_map.get((entry.publisher, entry.repo, entry.skill_slug))
+                try:
+                    commit_sha, files = await skill_loader(entry)
+                except Exception:
+                    skills_failed += 1
                     continue
-                await self._repository.record_external_verdict(
-                    skill_id=skill_id,
-                    partner=partner.partner,
-                    verdict=partner.verdict or "ALERTS",
-                    summary=partner.summary,
-                    analyzed_at=partner.analyzed_at,
+
+                if repo_snapshot_id is None:
+                    repo_snapshot_id = await self._repository.record_repo_snapshot(
+                        repo_id=repo_id,
+                        commit_sha=commit_sha,
+                        default_branch="main",
+                        discovered_skill_count=len(repo_entries),
+                    )
+                    repo_commit_sha = commit_sha
+
+                skill_id = await self._repository.upsert_skill(
+                    repo_id=repo_id,
+                    skill_slug=entry.skill_slug,
+                    title=audit_row.name if audit_row is not None else entry.skill_slug,
+                    relative_path=f"skills/{entry.skill_slug}",
+                    registry_url=entry.url,
                 )
+
+                report = self._analyzer.analyze_skill(
+                    publisher=entry.publisher,
+                    repo=entry.repo,
+                    skill_slug=entry.skill_slug,
+                    files=files,
+                )
+                risk_report = {
+                    "severity": report.severity,
+                    "score": report.score,
+                    "categories": [finding.category for finding in report.findings],
+                    "domains": report.domains,
+                    "findings": [
+                        {
+                            "path": finding.path,
+                            "category": finding.category,
+                            "severity": finding.severity,
+                            "evidence": finding.evidence,
+                        }
+                        for finding in report.findings
+                    ],
+                }
+                await self._repository.record_skill_snapshot(
+                    skill_id=skill_id,
+                    repo_snapshot_id=repo_snapshot_id,
+                    folder_hash=compute_folder_hash(files),
+                    version_label=f"main@{repo_commit_sha or commit_sha}",
+                    skill_text=files.get("SKILL.md", ""),
+                    referenced_files=sorted(files),
+                    extracted_domains=report.domains,
+                    risk_report=risk_report,
+                )
+
+                if audit_row is not None:
+                    for partner in audit_row.partners.values():
+                        if partner.verdict is None and partner.alert_count == 0:
+                            continue
+                        await self._repository.record_external_verdict(
+                            skill_id=skill_id,
+                            partner=partner.partner,
+                            verdict=partner.verdict or "ALERTS",
+                            summary=partner.summary,
+                            analyzed_at=partner.analyzed_at,
+                        )
+                skills_succeeded += 1
+
             await self._repository.mark_repo_scanned(repo_id=repo_id)
 
         return {
             "repos_seen": len(seen_repos),
-            "skills_seen": len(sitemap_entries),
+            "skills_seen": skills_succeeded,
+            "skills_failed": skills_failed,
         }

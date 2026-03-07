@@ -159,26 +159,16 @@ class SkillRepository:
         async with self._session_factory() as session:
             tracked_repos = await session.scalar(select(func.count()).select_from(SkillRepo))
             tracked_skills = await session.scalar(select(func.count()).select_from(Skill))
-            latest_snapshot_ids = (
-                select(func.max(SkillSnapshot.id))
-                .group_by(SkillSnapshot.skill_id)
-                .scalar_subquery()
+            latest_rows = await self._load_latest_skill_rows(session)
+            critical_skills = sum(
+                1
+                for _, _, snapshot_row in latest_rows
+                if (snapshot_row.risk_report or {}).get("severity") == "critical"
             )
-            critical_skills = await session.scalar(
-                select(func.count())
-                .select_from(SkillSnapshot)
-                .where(SkillSnapshot.id.in_(latest_snapshot_ids))
-                .where(func.json_extract(SkillSnapshot.risk_report, "$.severity") == "critical")
-            )
-            high_risk_skills = await session.scalar(
-                select(func.count())
-                .select_from(SkillSnapshot)
-                .where(SkillSnapshot.id.in_(latest_snapshot_ids))
-                .where(
-                    func.json_extract(SkillSnapshot.risk_report, "$.severity").in_(
-                        ["critical", "high"]
-                    )
-                )
+            high_risk_skills = sum(
+                1
+                for _, _, snapshot_row in latest_rows
+                if (snapshot_row.risk_report or {}).get("severity") in {"critical", "high"}
             )
             return {
                 "tracked_repos": int(tracked_repos or 0),
@@ -194,26 +184,14 @@ class SkillRepository:
         severity: str | None = None,
     ) -> list[dict]:
         async with self._session_factory() as session:
-            latest_snapshot_ids = (
-                select(func.max(SkillSnapshot.id))
-                .group_by(SkillSnapshot.skill_id)
-                .scalar_subquery()
-            )
-            statement = (
-                select(Skill, SkillRepo, SkillSnapshot)
-                .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-                .join(SkillSnapshot, SkillSnapshot.skill_id == Skill.id)
-                .where(SkillSnapshot.id.in_(latest_snapshot_ids))
-                .order_by(SkillSnapshot.id.desc())
-                .limit(limit)
-            )
+            rows = await self._load_latest_skill_rows(session)
             if severity is not None:
-                statement = statement.where(
-                    func.json_extract(SkillSnapshot.risk_report, "$.severity") == severity
-                )
-
-            result = await session.execute(statement)
-            rows = result.all()
+                rows = [
+                    row
+                    for row in rows
+                    if (row[2].risk_report or {}).get("severity") == severity
+                ]
+            rows = rows[:limit]
             return [
                 {
                     "publisher": repo_row.publisher,
@@ -231,6 +209,24 @@ class SkillRepository:
                 }
                 for skill_row, repo_row, snapshot_row in rows
             ]
+
+    async def _load_latest_skill_rows(
+        self,
+        session: AsyncSession,
+    ) -> list[tuple[Skill, SkillRepo, SkillSnapshot]]:
+        latest_snapshot_ids = (
+            select(func.max(SkillSnapshot.id))
+            .group_by(SkillSnapshot.skill_id)
+            .scalar_subquery()
+        )
+        result = await session.execute(
+            select(Skill, SkillRepo, SkillSnapshot)
+            .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+            .join(SkillSnapshot, SkillSnapshot.skill_id == Skill.id)
+            .where(SkillSnapshot.id.in_(latest_snapshot_ids))
+            .order_by(SkillSnapshot.id.desc())
+        )
+        return list(result.all())
 
     async def list_due_repos(self, *, now: datetime | None = None) -> list[dict]:
         now = now or datetime.now(UTC)

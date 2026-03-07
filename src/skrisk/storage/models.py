@@ -5,8 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.sqlite import JSON
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -104,7 +103,9 @@ class SkillSnapshot(Base):
     skill: Mapped[Skill] = relationship(back_populates="snapshots")
     repo_snapshot: Mapped[SkillRepoSnapshot] = relationship(back_populates="skill_snapshots")
 
-    __table_args__ = (UniqueConstraint("skill_id", "folder_hash", name="uq_skill_snapshot"),)
+    __table_args__ = (
+        UniqueConstraint("skill_id", "repo_snapshot_id", name="uq_skill_snapshot_observation"),
+    )
 
 
 class ExternalVerdict(Base):
