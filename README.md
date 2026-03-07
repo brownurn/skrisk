@@ -8,8 +8,11 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 - Mirrors linked GitHub skill repositories into local checkouts
 - Discovers skills across common agent directories and Claude plugin manifests
 - Snapshots repo and skill observations for repeated 72-hour rescans
-- Runs a first-pass static analyzer for prompt injection, remote execution, exfiltration, and obfuscation
-- Exposes a FastAPI JSON API and an HTML dashboard
+- Runs static analysis for prompt injection, remote execution, exfiltration, obfuscation, and change drift
+- Archives immutable Abuse.ch feed snapshots under `archive_root`
+- Normalizes URLs, domains, IPs, and hashes into canonical indicators with per-provider observations
+- Queues selective VirusTotal enrichment for the highest-risk indicators only
+- Exposes a FastAPI JSON API and a SvelteKit analyst frontend
 
 ## Current Commands
 
@@ -17,28 +20,59 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 . .venv/bin/activate
 skrisk init-db
 skrisk init-dirs
+skrisk sync-intel --provider abusech
 skrisk sync-registry
+skrisk enrich-vt --limit 25
 skrisk serve --host 127.0.0.1 --port 8080
+
+cd frontend
+npm install
+npm run build
+PUBLIC_SKRISK_API_BASE_URL=http://127.0.0.1:8080 npm run dev
 ```
+
+## Environment
+
+SK Risk reads backend settings from the local shell environment or `.envrc`.
+
+- `ABUSECH_AUTH_KEY`: used for `URLhaus` and `ThreatFox` bulk feed downloads
+- `VT_APIKEY`: used for selective VirusTotal enrichment
+- `SKRISK_VT_DAILY_BUDGET`: optional override for the daily VT call budget
+- `PUBLIC_SKRISK_API_BASE_URL`: frontend-only base URL for the FastAPI API
+
+## Frontend
+
+The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. `skrisk serve` serves the built SPA from `frontend/build`, while `npm run dev` is available for local UI work. The current routes are:
+
+- `/`: overview and feed activity
+- `/skills`: searchable evidence queue
+- `/skills/[publisher]/[repo]/[skill_slug]`: skill dossier and snapshot evidence
+- `/indicators/[indicator_type]/[indicator_value]`: indicator sightings, enrichments, and linked skills
+- `/queue/vt`: VT budget and queue state
 
 ## Project Structure
 
 - `src/skrisk/collectors`: registry parsing, GitHub mirroring, skill discovery
 - `src/skrisk/analysis`: deobfuscation and heuristic risk analysis
 - `src/skrisk/storage`: async SQLAlchemy models and repository helpers
-- `src/skrisk/services`: registry sync and local checkout ingestion
-- `src/skrisk/api`: JSON API, HTML dashboard, and templates
-- `tests`: regression coverage for collectors, rescans, sync, API, dashboard, and CLI
+- `src/skrisk/services`: registry sync, intelligence sync, VT triage, and local checkout ingestion
+- `src/skrisk/api`: JSON API and backend application surface
+- `frontend`: SvelteKit analyst console
+- `tests`: regression coverage for collectors, rescans, sync, API, VT, scoring, and CLI
 
 ## Documentation
 
 - [Implementation plan](docs/plans/2026-03-06-skrisk-v1.md)
 - [Kickoff notes and discussion decisions](docs/discussions/2026-03-06-kickoff.md)
+- [Threat intel and frontend design](docs/plans/2026-03-06-intel-enrichment-design.md)
+- [Threat intel implementation plan](docs/plans/2026-03-06-intel-enrichment-implementation.md)
+- [Risk and intelligence model](docs/architecture/risk-and-intel-model.md)
+- [Vendor and enrichment decisions](docs/discussions/2026-03-06-threat-intel-vendors.md)
 
 ## Current Gaps
 
 - Real source-repo URL resolution still assumes `https://github.com/{publisher}/{repo}` where registry metadata is missing
-- `mewhois`, `meip`, and third-party threat-intel adapters are not wired yet
+- `mewhois`, `meip`, and later enrichment layers such as Merklemap are not wired yet
 - The current storage path is optimized for local bootstrap; the production Postgres/Timescale rollout is documented but not implemented
 
 ## Maintainer
