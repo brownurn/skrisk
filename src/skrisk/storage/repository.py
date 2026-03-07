@@ -275,7 +275,7 @@ class SkillRepository:
                 select(func.count())
                 .select_from(IndicatorEnrichment)
                 .where(IndicatorEnrichment.provider == provider)
-                .where(IndicatorEnrichment.requested_at >= day_start)
+                .where(func.coalesce(IndicatorEnrichment.requested_at, IndicatorEnrichment.created_at) >= day_start)
             )
             return int(count or 0)
 
@@ -308,6 +308,14 @@ class SkillRepository:
                 .order_by(IndicatorEnrichment.id.asc())
             )
             enrichments = enrichment_result.scalars().all()
+            linked_skill_result = await session.execute(
+                select(SkillIndicatorLink, SkillSnapshot, Skill, SkillRepo)
+                .join(SkillSnapshot, SkillIndicatorLink.skill_snapshot_id == SkillSnapshot.id)
+                .join(Skill, SkillSnapshot.skill_id == Skill.id)
+                .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+                .where(SkillIndicatorLink.indicator_id == indicator.id)
+                .order_by(SkillIndicatorLink.id.asc())
+            )
             return {
                 "indicator": {
                     "id": indicator.id,
@@ -335,6 +343,18 @@ class SkillRepository:
                         "archive_relative_path": enrichment.archive_relative_path,
                     }
                     for enrichment in enrichments
+                ],
+                "linked_skills": [
+                    {
+                        "publisher": repo.publisher,
+                        "repo": repo.repo,
+                        "skill_slug": skill.skill_slug,
+                        "snapshot_id": snapshot.id,
+                        "version_label": snapshot.version_label,
+                        "source_path": link.source_path,
+                        "extraction_kind": link.extraction_kind,
+                    }
+                    for link, snapshot, skill, repo in linked_skill_result.all()
                 ],
             }
 
@@ -531,6 +551,63 @@ class SkillRepository:
                 }
                 for skill_row, repo_row, snapshot_row in rows
             ]
+
+    async def list_intel_feed_runs(self, *, limit: int = 20) -> list[dict]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(IntelFeedRun)
+                .order_by(IntelFeedRun.id.desc())
+                .limit(limit)
+            )
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "provider": row.provider,
+                    "feed_name": row.feed_name,
+                    "source_url": row.source_url,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    async def list_indicators(
+        self,
+        *,
+        limit: int = 50,
+        indicator_type: str | None = None,
+    ) -> list[dict]:
+        async with self._session_factory() as session:
+            query = select(Indicator).order_by(Indicator.id.desc()).limit(limit)
+            if indicator_type is not None:
+                query = query.where(Indicator.indicator_type == indicator_type)
+
+            result = await session.execute(query)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "indicator_type": row.indicator_type,
+                    "indicator_value": row.indicator_value,
+                    "normalized_value": row.normalized_value,
+                }
+                for row in rows
+            ]
+
+    async def get_vt_queue_status(
+        self,
+        *,
+        daily_budget: int,
+        now: datetime | None = None,
+    ) -> dict:
+        queue_items = await self.list_vt_queue_items()
+        used_today = await self.count_indicator_enrichments_today(provider="virustotal", now=now)
+        return {
+            "daily_budget": daily_budget,
+            "daily_budget_used": used_today,
+            "daily_budget_remaining": max(0, daily_budget - used_today),
+            "queue_items": queue_items,
+        }
 
     async def _load_latest_skill_rows(
         self,
