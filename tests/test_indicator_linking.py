@@ -72,6 +72,7 @@ async def test_ingest_local_checkout_links_extracted_indicators_and_confirms_abu
         repo="skillz",
         skill_slug="dropper",
     )
+    queue_items = await repository.list_vt_queue_items()
 
     assert detail is not None
     latest_snapshot = detail["latest_snapshot"]
@@ -82,6 +83,8 @@ async def test_ingest_local_checkout_links_extracted_indicators_and_confirms_abu
     assert risk_report["behavior_score"] >= 40
     assert risk_report["intel_score"] > 0
     assert risk_report["indicator_matches"][0]["indicator_value"] == "bad.example"
+    assert queue_items[0]["indicator_value"] == "https://bad.example/install.sh"
+    assert queue_items[0]["priority"] == 100
     assert any(
         link["indicator_value"] == "bad.example"
         for link in latest_snapshot["indicator_links"]

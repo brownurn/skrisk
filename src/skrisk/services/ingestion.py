@@ -77,6 +77,10 @@ async def ingest_local_checkout(
             repository=repository,
             report=report,
         )
+        risk_report = analyzer.build_risk_report(
+            report=report,
+            indicator_matches=indicator_matches,
+        )
         skill_snapshot_id = await repository.record_skill_snapshot(
             skill_id=skill_id,
             repo_snapshot_id=repo_snapshot_id,
@@ -85,15 +89,17 @@ async def ingest_local_checkout(
             skill_text=files.get("SKILL.md", ""),
             referenced_files=sorted(files),
             extracted_domains=report.domains,
-            risk_report=analyzer.build_risk_report(
-                report=report,
-                indicator_matches=indicator_matches,
-            ),
+            risk_report=risk_report,
         )
         await _record_skill_indicator_links(
             repository=repository,
             skill_snapshot_id=skill_snapshot_id,
             linked_indicators=linked_indicators,
+        )
+        await _enqueue_vt_candidates(
+            repository=repository,
+            linked_indicators=linked_indicators,
+            risk_report=risk_report,
         )
 
 
@@ -161,4 +167,32 @@ async def _record_skill_indicator_links(
             extraction_kind=indicator.extraction_kind,
             raw_value=indicator.raw_value,
             is_new_in_snapshot=True,
+        )
+
+
+async def _enqueue_vt_candidates(
+    *,
+    repository: SkillRepository,
+    linked_indicators: list[tuple[object, int]],
+    risk_report: dict,
+) -> None:
+    if risk_report["severity"] not in {"critical", "high"}:
+        return
+    if risk_report["behavior_score"] < 40 and risk_report["intel_score"] <= 0:
+        return
+
+    priority = 100 if risk_report["severity"] == "critical" else 80
+    seen: set[tuple[str, str]] = set()
+    for indicator, _ in linked_indicators:
+        if indicator.indicator_type not in {"url", "domain", "sha256"}:
+            continue
+        key = (indicator.indicator_type, indicator.indicator_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        await repository.enqueue_vt_lookup(
+            indicator_type=indicator.indicator_type,
+            indicator_value=indicator.indicator_value,
+            priority=priority,
+            reason=f"{risk_report['severity']}-skill",
         )

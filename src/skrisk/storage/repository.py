@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from skrisk.storage.models import (
     ExternalVerdict,
     Indicator,
+    IndicatorEnrichment,
     IndicatorObservation,
     IntelFeedRun,
     Skill,
@@ -18,6 +19,7 @@ from skrisk.storage.models import (
     SkillRepo,
     SkillRepoSnapshot,
     SkillSnapshot,
+    VTLookupQueueItem,
 )
 
 
@@ -150,6 +152,133 @@ class SkillRepository:
             await session.refresh(row)
             return row.id
 
+    async def record_indicator_enrichment(
+        self,
+        *,
+        indicator_id: int,
+        provider: str,
+        lookup_key: str,
+        status: str,
+        summary: str | None,
+        archive_relative_path: str | None,
+        normalized_payload: dict[str, Any] | None,
+        requested_at: datetime | None,
+        completed_at: datetime | None,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = IndicatorEnrichment(
+                indicator_id=indicator_id,
+                provider=provider,
+                lookup_key=lookup_key,
+                status=status,
+                summary=summary,
+                archive_relative_path=archive_relative_path,
+                normalized_payload=normalized_payload,
+                requested_at=requested_at,
+                completed_at=completed_at,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def enqueue_vt_lookup(
+        self,
+        *,
+        indicator_type: str,
+        indicator_value: str,
+        priority: int,
+        reason: str,
+        requested_by: str | None = None,
+    ) -> int:
+        indicator_id = await self.upsert_indicator(indicator_type, indicator_value)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(VTLookupQueueItem).where(
+                    VTLookupQueueItem.indicator_id == indicator_id,
+                    VTLookupQueueItem.status.in_(("queued", "running")),
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = VTLookupQueueItem(
+                    indicator_id=indicator_id,
+                    priority=priority,
+                    reason=reason,
+                    status="queued",
+                    requested_by=requested_by,
+                )
+                session.add(row)
+            else:
+                row.priority = max(row.priority, priority)
+                row.reason = reason
+                row.requested_by = requested_by or row.requested_by
+
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def list_vt_queue_items(self, *, status: str | None = None) -> list[dict]:
+        async with self._session_factory() as session:
+            query = (
+                select(VTLookupQueueItem, Indicator)
+                .join(Indicator, VTLookupQueueItem.indicator_id == Indicator.id)
+                .order_by(VTLookupQueueItem.priority.desc(), VTLookupQueueItem.id.asc())
+            )
+            if status is not None:
+                query = query.where(VTLookupQueueItem.status == status)
+
+            result = await session.execute(query)
+            return [
+                {
+                    "id": queue_item.id,
+                    "indicator_id": indicator.id,
+                    "indicator_type": indicator.indicator_type,
+                    "indicator_value": indicator.indicator_value,
+                    "priority": queue_item.priority,
+                    "reason": queue_item.reason,
+                    "status": queue_item.status,
+                    "attempt_count": queue_item.attempt_count,
+                }
+                for queue_item, indicator in result.all()
+            ]
+
+    async def update_vt_queue_item(
+        self,
+        *,
+        queue_item_id: int,
+        status: str,
+        attempt_count: int | None = None,
+        next_attempt_at: datetime | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(VTLookupQueueItem).where(VTLookupQueueItem.id == queue_item_id)
+            )
+            row = result.scalar_one()
+            row.status = status
+            if attempt_count is not None:
+                row.attempt_count = attempt_count
+            row.next_attempt_at = next_attempt_at
+            await session.commit()
+
+    async def count_indicator_enrichments_today(
+        self,
+        *,
+        provider: str,
+        now: datetime | None = None,
+    ) -> int:
+        now = now or datetime.now(UTC)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        async with self._session_factory() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(IndicatorEnrichment)
+                .where(IndicatorEnrichment.provider == provider)
+                .where(IndicatorEnrichment.requested_at >= day_start)
+            )
+            return int(count or 0)
+
     async def get_indicator_detail(
         self,
         indicator_type: str,
@@ -173,6 +302,12 @@ class SkillRepository:
                 .order_by(IndicatorObservation.id.asc())
             )
             observations = observation_result.scalars().all()
+            enrichment_result = await session.execute(
+                select(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id == indicator.id)
+                .order_by(IndicatorEnrichment.id.asc())
+            )
+            enrichments = enrichment_result.scalars().all()
             return {
                 "indicator": {
                     "id": indicator.id,
@@ -190,6 +325,16 @@ class SkillRepository:
                         "summary": observation.summary,
                     }
                     for observation in observations
+                ],
+                "enrichments": [
+                    {
+                        "provider": enrichment.provider,
+                        "lookup_key": enrichment.lookup_key,
+                        "status": enrichment.status,
+                        "summary": enrichment.summary,
+                        "archive_relative_path": enrichment.archive_relative_path,
+                    }
+                    for enrichment in enrichments
                 ],
             }
 
