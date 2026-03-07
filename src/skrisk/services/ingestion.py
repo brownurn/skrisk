@@ -73,7 +73,11 @@ async def ingest_local_checkout(
                 f"https://skills.sh/{publisher}/{repo}/{discovered.slug}",
             ),
         )
-        await repository.record_skill_snapshot(
+        linked_indicators, indicator_matches = await _prepare_indicator_context(
+            repository=repository,
+            report=report,
+        )
+        skill_snapshot_id = await repository.record_skill_snapshot(
             skill_id=skill_id,
             repo_snapshot_id=repo_snapshot_id,
             folder_hash=_folder_hash(files),
@@ -81,11 +85,15 @@ async def ingest_local_checkout(
             skill_text=files.get("SKILL.md", ""),
             referenced_files=sorted(files),
             extracted_domains=report.domains,
-            risk_report={
-                "severity": report.severity,
-                "score": report.score,
-                "categories": [finding.category for finding in report.findings],
-            },
+            risk_report=analyzer.build_risk_report(
+                report=report,
+                indicator_matches=indicator_matches,
+            ),
+        )
+        await _record_skill_indicator_links(
+            repository=repository,
+            skill_snapshot_id=skill_snapshot_id,
+            linked_indicators=linked_indicators,
         )
 
 
@@ -108,3 +116,49 @@ def _folder_hash(files: dict[str, str]) -> str:
         digest.update(content.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+async def _prepare_indicator_context(
+    *,
+    repository: SkillRepository,
+    report,
+) -> tuple[list[tuple[object, int]], list[dict]]:
+    linked_indicators: list[tuple[object, int]] = []
+    indicator_matches: dict[tuple[str, str], dict] = {}
+
+    for indicator in report.indicators:
+        indicator_id = await repository.upsert_indicator(
+            indicator.indicator_type,
+            indicator.indicator_value,
+        )
+        linked_indicators.append((indicator, indicator_id))
+        detail = await repository.get_indicator_detail(
+            indicator.indicator_type,
+            indicator.indicator_value,
+        )
+        if detail is None or not detail["observations"]:
+            continue
+        key = (
+            detail["indicator"]["indicator_type"],
+            detail["indicator"]["normalized_value"],
+        )
+        indicator_matches[key] = detail
+
+    return linked_indicators, list(indicator_matches.values())
+
+
+async def _record_skill_indicator_links(
+    *,
+    repository: SkillRepository,
+    skill_snapshot_id: int,
+    linked_indicators: list[tuple[object, int]],
+) -> None:
+    for indicator, indicator_id in linked_indicators:
+        await repository.record_skill_indicator_link(
+            skill_snapshot_id=skill_snapshot_id,
+            indicator_id=indicator_id,
+            source_path=indicator.path,
+            extraction_kind=indicator.extraction_kind,
+            raw_value=indicator.raw_value,
+            is_new_in_snapshot=True,
+        )

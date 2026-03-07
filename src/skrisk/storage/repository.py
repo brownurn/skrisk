@@ -14,6 +14,7 @@ from skrisk.storage.models import (
     IndicatorObservation,
     IntelFeedRun,
     Skill,
+    SkillIndicatorLink,
     SkillRepo,
     SkillRepoSnapshot,
     SkillSnapshot,
@@ -119,6 +120,30 @@ class SkillRepository:
                 provider_score=provider_score,
                 summary=summary,
                 raw_payload=raw_payload,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def record_skill_indicator_link(
+        self,
+        *,
+        skill_snapshot_id: int,
+        indicator_id: int,
+        source_path: str | None,
+        extraction_kind: str | None,
+        raw_value: str | None,
+        is_new_in_snapshot: bool,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = SkillIndicatorLink(
+                skill_snapshot_id=skill_snapshot_id,
+                indicator_id=indicator_id,
+                source_path=source_path,
+                extraction_kind=extraction_kind,
+                raw_value=raw_value,
+                is_new_in_snapshot=is_new_in_snapshot,
             )
             session.add(row)
             await session.commit()
@@ -449,6 +474,27 @@ class SkillRepository:
             )
             verdicts = verdict_result.scalars().all()
 
+            indicator_links: list[dict[str, Any]] = []
+            if latest_snapshot is not None:
+                link_result = await session.execute(
+                    select(SkillIndicatorLink, Indicator)
+                    .join(Indicator, SkillIndicatorLink.indicator_id == Indicator.id)
+                    .where(SkillIndicatorLink.skill_snapshot_id == latest_snapshot.id)
+                    .order_by(SkillIndicatorLink.id.asc())
+                )
+                indicator_links = [
+                    {
+                        "indicator_id": indicator.id,
+                        "indicator_type": indicator.indicator_type,
+                        "indicator_value": indicator.indicator_value,
+                        "source_path": link.source_path,
+                        "extraction_kind": link.extraction_kind,
+                        "raw_value": link.raw_value,
+                        "is_new_in_snapshot": link.is_new_in_snapshot,
+                    }
+                    for link, indicator in link_result.all()
+                ]
+
             return {
                 "publisher": publisher,
                 "repo": repo,
@@ -464,6 +510,7 @@ class SkillRepository:
                         "referenced_files": latest_snapshot.referenced_files,
                         "extracted_domains": latest_snapshot.extracted_domains,
                         "risk_report": latest_snapshot.risk_report,
+                        "indicator_links": indicator_links,
                     }
                     if latest_snapshot is not None
                     else None
