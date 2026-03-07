@@ -102,6 +102,7 @@ class SkillSnapshot(Base):
 
     skill: Mapped[Skill] = relationship(back_populates="snapshots")
     repo_snapshot: Mapped[SkillRepoSnapshot] = relationship(back_populates="skill_snapshots")
+    indicator_links: Mapped[list["SkillIndicatorLink"]] = relationship(back_populates="skill_snapshot")
 
     __table_args__ = (
         UniqueConstraint("skill_id", "repo_snapshot_id", name="uq_skill_snapshot_observation"),
@@ -122,3 +123,155 @@ class ExternalVerdict(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     skill: Mapped[Skill] = relationship(back_populates="external_verdicts")
+
+
+class IntelFeedRun(Base):
+    """Download and parse run for a bulk intelligence feed."""
+
+    __tablename__ = "intel_feed_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    feed_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    auth_mode: Mapped[str | None] = mapped_column(String(100))
+    parser_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(255), nullable=False)
+    archive_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    artifacts: Mapped[list["IntelFeedArtifact"]] = relationship(back_populates="feed_run")
+    observations: Mapped[list["IndicatorObservation"]] = relationship(back_populates="feed_run")
+
+
+class IntelFeedArtifact(Base):
+    """Immutable file tied to an intelligence feed run."""
+
+    __tablename__ = "intel_feed_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feed_run_id: Mapped[int] = mapped_column(ForeignKey("intel_feed_runs.id"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(2000), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    feed_run: Mapped[IntelFeedRun] = relationship(back_populates="artifacts")
+
+
+class Indicator(Base):
+    """Canonical IOC identity across skills and external feeds."""
+
+    __tablename__ = "indicators"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    indicator_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    indicator_value: Mapped[str] = mapped_column(String(2000), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(2000), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    observations: Mapped[list["IndicatorObservation"]] = relationship(back_populates="indicator")
+    skill_links: Mapped[list["SkillIndicatorLink"]] = relationship(back_populates="indicator")
+    enrichments: Mapped[list["IndicatorEnrichment"]] = relationship(back_populates="indicator")
+    vt_queue_items: Mapped[list["VTLookupQueueItem"]] = relationship(back_populates="indicator")
+
+    __table_args__ = (
+        UniqueConstraint("indicator_type", "normalized_value", name="uq_indicator_identity"),
+    )
+
+
+class IndicatorObservation(Base):
+    """Provider-specific observation attached to a canonical indicator."""
+
+    __tablename__ = "indicator_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    indicator_id: Mapped[int] = mapped_column(ForeignKey("indicators.id"), nullable=False)
+    feed_run_id: Mapped[int] = mapped_column(ForeignKey("intel_feed_runs.id"), nullable=False)
+    source_provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_feed: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_record_id: Mapped[str | None] = mapped_column(String(255))
+    classification: Mapped[str | None] = mapped_column(String(100))
+    confidence_label: Mapped[str | None] = mapped_column(String(100))
+    malware_family: Mapped[str | None] = mapped_column(String(255))
+    threat_type: Mapped[str | None] = mapped_column(String(255))
+    reporter: Mapped[str | None] = mapped_column(String(255))
+    first_seen_in_source: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_in_source: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_score: Mapped[int | None] = mapped_column(Integer)
+    summary: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    indicator: Mapped[Indicator] = relationship(back_populates="observations")
+    feed_run: Mapped[IntelFeedRun] = relationship(back_populates="observations")
+
+
+class SkillIndicatorLink(Base):
+    """Skill snapshot evidence pointing at an extracted indicator."""
+
+    __tablename__ = "skill_indicator_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    skill_snapshot_id: Mapped[int] = mapped_column(ForeignKey("skill_snapshots.id"), nullable=False)
+    indicator_id: Mapped[int] = mapped_column(ForeignKey("indicators.id"), nullable=False)
+    source_path: Mapped[str | None] = mapped_column(String(1000))
+    extraction_kind: Mapped[str | None] = mapped_column(String(100))
+    raw_value: Mapped[str | None] = mapped_column(String(2000))
+    is_new_in_snapshot: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    skill_snapshot: Mapped[SkillSnapshot] = relationship(back_populates="indicator_links")
+    indicator: Mapped[Indicator] = relationship(back_populates="skill_links")
+
+
+class IndicatorEnrichment(Base):
+    """Cached non-bulk enrichment attached to a canonical indicator."""
+
+    __tablename__ = "indicator_enrichments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    indicator_id: Mapped[int] = mapped_column(ForeignKey("indicators.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    lookup_key: Mapped[str] = mapped_column(String(2000), nullable=False)
+    status: Mapped[str] = mapped_column(String(100), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    archive_relative_path: Mapped[str | None] = mapped_column(String(2000))
+    normalized_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    indicator: Mapped[Indicator] = relationship(back_populates="enrichments")
+
+
+class VTLookupQueueItem(Base):
+    """Queued selective VT lookup for a canonical indicator."""
+
+    __tablename__ = "vt_lookup_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    indicator_id: Mapped[int] = mapped_column(ForeignKey("indicators.id"), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(100), nullable=False, default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    indicator: Mapped[Indicator] = relationship(back_populates="vt_queue_items")

@@ -15,6 +15,9 @@ class Settings:
     skills_sh_base_url: str = "https://skills.sh"
     scan_interval_hours: int = 72
     default_branch: str = "main"
+    abusech_auth_key: str | None = None
+    vt_api_key: str | None = None
+    vt_daily_budget: int = 450
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -33,4 +36,7 @@ def load_settings() -> Settings:
         skills_sh_base_url=os.getenv("SKRISK_SKILLS_SH_BASE_URL", "https://skills.sh"),
         scan_interval_hours=int(os.getenv("SKRISK_SCAN_INTERVAL_HOURS", "72")),
         default_branch=os.getenv("SKRISK_DEFAULT_BRANCH", "main"),
+        abusech_auth_key=os.getenv("ABUSECH_AUTH_KEY"),
+        vt_api_key=os.getenv("VT_APIKEY"),
+        vt_daily_budget=int(os.getenv("SKRISK_VT_DAILY_BUDGET", "450")),
     )

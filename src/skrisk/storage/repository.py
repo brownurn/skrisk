@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from skrisk.storage.models import ExternalVerdict, Skill, SkillRepo, SkillRepoSnapshot, SkillSnapshot
+from skrisk.storage.models import (
+    ExternalVerdict,
+    Indicator,
+    IndicatorObservation,
+    IntelFeedRun,
+    Skill,
+    SkillRepo,
+    SkillRepoSnapshot,
+    SkillSnapshot,
+)
 
 
 class SkillRepository:
@@ -15,6 +25,148 @@ class SkillRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def record_intel_feed_run(
+        self,
+        *,
+        provider: str,
+        feed_name: str,
+        source_url: str,
+        auth_mode: str | None,
+        parser_version: str,
+        archive_sha256: str,
+        archive_size_bytes: int,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = IntelFeedRun(
+                provider=provider,
+                feed_name=feed_name,
+                source_url=source_url,
+                auth_mode=auth_mode,
+                parser_version=parser_version,
+                archive_sha256=archive_sha256,
+                archive_size_bytes=archive_size_bytes,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def upsert_indicator(
+        self,
+        indicator_type: str,
+        indicator_value: str,
+    ) -> int:
+        normalized_value = _normalize_indicator_value(indicator_type, indicator_value)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Indicator).where(
+                    Indicator.indicator_type == indicator_type,
+                    Indicator.normalized_value == normalized_value,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = Indicator(
+                    indicator_type=indicator_type,
+                    indicator_value=indicator_value.strip(),
+                    normalized_value=normalized_value,
+                    first_seen_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                )
+                session.add(row)
+            else:
+                row.indicator_value = indicator_value.strip()
+                row.last_seen_at = datetime.now(UTC)
+
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def record_indicator_observation(
+        self,
+        *,
+        indicator_id: int,
+        feed_run_id: int,
+        source_provider: str,
+        source_feed: str,
+        classification: str | None,
+        confidence_label: str | None,
+        summary: str | None,
+        provider_record_id: str | None = None,
+        malware_family: str | None = None,
+        threat_type: str | None = None,
+        reporter: str | None = None,
+        first_seen_in_source: datetime | None = None,
+        last_seen_in_source: datetime | None = None,
+        provider_score: int | None = None,
+        raw_payload: dict[str, Any] | None = None,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = IndicatorObservation(
+                indicator_id=indicator_id,
+                feed_run_id=feed_run_id,
+                source_provider=source_provider,
+                source_feed=source_feed,
+                provider_record_id=provider_record_id,
+                classification=classification,
+                confidence_label=confidence_label,
+                malware_family=malware_family,
+                threat_type=threat_type,
+                reporter=reporter,
+                first_seen_in_source=first_seen_in_source,
+                last_seen_in_source=last_seen_in_source,
+                provider_score=provider_score,
+                summary=summary,
+                raw_payload=raw_payload,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def get_indicator_detail(
+        self,
+        indicator_type: str,
+        indicator_value: str,
+    ) -> dict | None:
+        normalized_value = _normalize_indicator_value(indicator_type, indicator_value)
+        async with self._session_factory() as session:
+            indicator_result = await session.execute(
+                select(Indicator).where(
+                    Indicator.indicator_type == indicator_type,
+                    Indicator.normalized_value == normalized_value,
+                )
+            )
+            indicator = indicator_result.scalar_one_or_none()
+            if indicator is None:
+                return None
+
+            observation_result = await session.execute(
+                select(IndicatorObservation)
+                .where(IndicatorObservation.indicator_id == indicator.id)
+                .order_by(IndicatorObservation.id.asc())
+            )
+            observations = observation_result.scalars().all()
+            return {
+                "indicator": {
+                    "id": indicator.id,
+                    "indicator_type": indicator.indicator_type,
+                    "indicator_value": indicator.indicator_value,
+                    "normalized_value": indicator.normalized_value,
+                },
+                "observations": [
+                    {
+                        "id": observation.id,
+                        "source_provider": observation.source_provider,
+                        "source_feed": observation.source_feed,
+                        "classification": observation.classification,
+                        "confidence_label": observation.confidence_label,
+                        "summary": observation.summary,
+                    }
+                    for observation in observations
+                ],
+            }
 
     async def upsert_skill_repo(
         self,
@@ -326,3 +478,10 @@ class SkillRepository:
                     for verdict in verdicts
                 ],
             }
+
+
+def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str:
+    value = indicator_value.strip()
+    if indicator_type in {"domain", "hostname", "ip", "sha256"}:
+        return value.lower()
+    return value
