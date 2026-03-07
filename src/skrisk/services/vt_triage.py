@@ -35,6 +35,7 @@ class VTTriageService:
         queue_items = await self._repository.list_vt_queue_items(status="queued")
 
         completed = 0
+        failed = 0
         skipped_budget = 0
 
         for queue_item in queue_items:
@@ -47,36 +48,44 @@ class VTTriageService:
                 status="running",
                 attempt_count=queue_item["attempt_count"] + 1,
             )
-            payload = await self._client.lookup(
-                queue_item["indicator_type"],
-                queue_item["indicator_value"],
-            )
-            archive_relative_path = self._archive_response(
-                indicator_type=queue_item["indicator_type"],
-                indicator_value=queue_item["indicator_value"],
-                payload=payload,
-                fetched_at=now,
-            )
-            await self._repository.record_indicator_enrichment(
-                indicator_id=queue_item["indicator_id"],
-                provider="virustotal",
-                lookup_key=queue_item["indicator_value"],
-                status="completed",
-                summary=_summarize_payload(payload),
-                archive_relative_path=archive_relative_path,
-                normalized_payload=payload,
-                requested_at=now,
-                completed_at=now,
-            )
-            await self._repository.update_vt_queue_item(
-                queue_item_id=queue_item["id"],
-                status="completed",
-            )
-            remaining_budget -= 1
-            completed += 1
+            try:
+                payload = await self._client.lookup(
+                    queue_item["indicator_type"],
+                    queue_item["indicator_value"],
+                )
+                archive_relative_path = self._archive_response(
+                    indicator_type=queue_item["indicator_type"],
+                    indicator_value=queue_item["indicator_value"],
+                    payload=payload,
+                    fetched_at=now,
+                )
+                await self._repository.record_indicator_enrichment(
+                    indicator_id=queue_item["indicator_id"],
+                    provider="virustotal",
+                    lookup_key=queue_item["indicator_value"],
+                    status="completed",
+                    summary=_summarize_payload(payload),
+                    archive_relative_path=archive_relative_path,
+                    normalized_payload=payload,
+                    requested_at=now,
+                    completed_at=now,
+                )
+                await self._repository.update_vt_queue_item(
+                    queue_item_id=queue_item["id"],
+                    status="completed",
+                )
+                remaining_budget -= 1
+                completed += 1
+            except Exception:
+                await self._repository.update_vt_queue_item(
+                    queue_item_id=queue_item["id"],
+                    status="failed",
+                )
+                failed += 1
 
         return {
             "lookups_completed": completed,
+            "lookups_failed": failed,
             "lookups_skipped_budget": skipped_budget,
         }
 
