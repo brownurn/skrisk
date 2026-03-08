@@ -158,3 +158,76 @@ async def test_scan_attribution_appends_history_without_overwriting_current_dire
         "scan_attribution",
     ]
     assert observations[1]["repo_snapshot_id"] == repo_snapshot_id
+
+
+@pytest.mark.asyncio
+async def test_older_directory_fetch_does_not_regress_current_install_metrics(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'out-of-order-observations.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=5,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="agent-tools",
+        title="agent-tools",
+        relative_path="skills/agent-tools",
+        registry_url="https://skills.sh/tul-sh/skills/agent-tools",
+    )
+
+    newer_run_id = await repository.record_registry_sync_run(
+        source="skills.sh",
+        view="all-time",
+        total_skills_reported=3,
+        pages_fetched=1,
+        success=True,
+    )
+    newer_observed_at = datetime(2026, 3, 8, 16, 0, tzinfo=UTC)
+    await repository.record_skill_registry_observation(
+        skill_id=skill_id,
+        registry_sync_run_id=newer_run_id,
+        repo_snapshot_id=None,
+        observed_at=newer_observed_at,
+        weekly_installs=1500,
+        registry_rank=3,
+        observation_kind="directory_fetch",
+        raw_payload={"installs": 1500},
+    )
+
+    older_run_id = await repository.record_registry_sync_run(
+        source="skills.sh",
+        view="all-time",
+        total_skills_reported=3,
+        pages_fetched=1,
+        success=True,
+    )
+    older_observed_at = datetime(2026, 3, 7, 16, 0, tzinfo=UTC)
+    await repository.record_skill_registry_observation(
+        skill_id=skill_id,
+        registry_sync_run_id=older_run_id,
+        repo_snapshot_id=None,
+        observed_at=older_observed_at,
+        weekly_installs=1200,
+        registry_rank=4,
+        observation_kind="directory_fetch",
+        raw_payload={"installs": 1200},
+    )
+
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
+    observations = await repository.list_skill_registry_observations(skill_id=skill_id)
+
+    assert detail is not None
+    assert detail["current_weekly_installs"] == 1500
+    assert detail["current_registry_rank"] == 3
+    assert detail["current_weekly_installs_observed_at"] == newer_observed_at.isoformat()
+    assert [row["weekly_installs"] for row in observations] == [1200, 1500]

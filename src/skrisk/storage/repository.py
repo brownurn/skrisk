@@ -111,10 +111,15 @@ class SkillRepository:
             if observation_kind == "directory_fetch":
                 skill = await session.get(Skill, skill_id)
                 if skill is not None:
-                    skill.current_weekly_installs = weekly_installs
-                    skill.current_weekly_installs_observed_at = observed_at
-                    skill.current_registry_rank = registry_rank
-                    skill.current_registry_sync_run_id = registry_sync_run_id
+                    current_observed_at = _coerce_datetime_utc(
+                        skill.current_weekly_installs_observed_at
+                    )
+                    incoming_observed_at = _coerce_datetime_utc(observed_at)
+                    if current_observed_at is None or incoming_observed_at >= current_observed_at:
+                        skill.current_weekly_installs = weekly_installs
+                        skill.current_weekly_installs_observed_at = incoming_observed_at
+                        skill.current_registry_rank = registry_rank
+                        skill.current_registry_sync_run_id = registry_sync_run_id
 
             await session.commit()
             await session.refresh(row)
@@ -912,6 +917,15 @@ def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str
 def _isoformat_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
+    value = _coerce_datetime_utc(value)
+    if value is None:
+        return None
     return value.isoformat()
+
+
+def _coerce_datetime_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
