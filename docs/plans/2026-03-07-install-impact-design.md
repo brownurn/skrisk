@@ -4,6 +4,16 @@
 
 **Goal:** Track `skills.sh` weekly install counts as a first-class impact signal, preserve their history over time, attach install footprint to scanned skill snapshots, and expose that data in the SK Risk API and Svelte frontend.
 
+## Implementation Status
+
+The implementation on `feat/install-impact-telemetry` now matches this design in the main repo surfaces:
+
+- `skills` caches the latest directory-derived install metrics while `registry_sync_runs` and `skill_registry_observations` retain append-only provenance
+- `directory_fetch` remains the source of truth for current install metrics and scoring inputs; `scan_attribution` preserves scan-time context in detail history without replacing the registry baseline
+- `/api/skills` and `/api/skills/{publisher}/{repo}/{skill_slug}` expose installs, impact, priority, and install history
+- the Svelte `/skills` route loads priority ordering by default, exposes install-bucket filtering, and keeps dedicated `Priority` and `Weekly Installs` columns
+- history begins with the first install-aware sync forward; there is no retroactive backfill for older snapshots
+
 ## Problem
 
 SK Risk currently treats the `skills.sh` directory as a discovery source and stores skill identity, ranking, and scan results, but it does not preserve the `Weekly Installs` value shown on `skills.sh`. That leaves a major gap in analyst context:

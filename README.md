@@ -8,7 +8,10 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 - Mirrors linked GitHub skill repositories into local checkouts
 - Discovers skills across common agent directories and Claude plugin manifests
 - Snapshots repo and skill observations for repeated 72-hour rescans
+- Tracks `skills.sh` weekly installs as hybrid current-plus-history telemetry
+- Preserves install provenance from `registry_sync_runs` and `skill_registry_observations`
 - Runs static analysis for prompt injection, remote execution, exfiltration, obfuscation, and change drift
+- Separates risk severity from install-derived impact and triage priority
 - Archives immutable Abuse.ch feed snapshots under `archive_root`
 - Normalizes URLs, domains, IPs, and hashes into canonical indicators with per-provider observations
 - Queues selective VirusTotal enrichment for the highest-risk indicators only
@@ -50,6 +53,15 @@ The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. 
 - `/indicators/[indicator_type]/[indicator_value]`: indicator sightings, enrichments, and linked skills
 - `/queue/vt`: VT budget and queue state
 
+Install telemetry now surfaces through both the API and the frontend:
+
+- `/api/skills` returns `current_weekly_installs`, `current_weekly_installs_observed_at`, `peak_weekly_installs`, `weekly_installs_delta`, `impact_score`, and `priority_score`; it also accepts `min_weekly_installs`, `max_weekly_installs`, and `sort=priority|risk|installs|growth`
+- `/api/skills/{publisher}/{repo}/{skill_slug}` adds append-only `install_history` rows so analysts can compare `directory_fetch` provenance with `scan_attribution`
+- `/skills` loads priority-first ordering by default, keeps `Priority` and `Weekly Installs` as dedicated columns, and supports local severity, install-bucket, and search filters plus priority/install sorting
+- `/skills/[publisher]/[repo]/[skill_slug]` shows latest installs, peak installs, install delta, impact, priority, and the recorded install history for that skill
+
+Current install metrics are derived from `directory_fetch` observations. Detail-page history preserves both `directory_fetch` and `scan_attribution` rows so analysts can see the install footprint attached to a scanned snapshot without overwriting the registry crawl baseline.
+
 ## Project Structure
 
 - `src/skrisk/collectors`: registry parsing, GitHub mirroring, skill discovery
@@ -66,6 +78,7 @@ The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. 
 - [Kickoff notes and discussion decisions](docs/discussions/2026-03-06-kickoff.md)
 - [Threat intel and frontend design](docs/plans/2026-03-06-intel-enrichment-design.md)
 - [Threat intel implementation plan](docs/plans/2026-03-06-intel-enrichment-implementation.md)
+- [Install impact telemetry design](docs/plans/2026-03-07-install-impact-design.md)
 - [Risk and intelligence model](docs/architecture/risk-and-intel-model.md)
 - [Vendor and enrichment decisions](docs/discussions/2026-03-06-threat-intel-vendors.md)
 
