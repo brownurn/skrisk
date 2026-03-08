@@ -30,6 +30,7 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> APIRouter
         min_weekly_installs: int | None = None,
         max_weekly_installs: int | None = None,
         sort: Literal["priority", "risk", "installs", "growth"] | None = None,
+        q: str | None = None,
     ) -> list[dict]:
         await ensure_initialized(session_factory)
         return await repository.list_skills(
@@ -38,6 +39,28 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> APIRouter
             min_weekly_installs=min_weekly_installs,
             max_weekly_installs=max_weekly_installs,
             sort=sort,
+            query=q,
+        )
+
+    @router.get("/api/skills/page")
+    async def list_skills_page(
+        page: int = 1,
+        page_size: int = 100,
+        severity: str | None = None,
+        min_weekly_installs: int | None = None,
+        max_weekly_installs: int | None = None,
+        sort: Literal["priority", "risk", "installs", "growth"] | None = None,
+        q: str | None = None,
+    ) -> dict:
+        await ensure_initialized(session_factory)
+        return await repository.list_skills_page(
+            page=page,
+            page_size=page_size,
+            severity=severity,
+            min_weekly_installs=min_weekly_installs,
+            max_weekly_installs=max_weekly_installs,
+            sort=sort,
+            query=q,
         )
 
     @router.get("/api/skills/{publisher}/{repo}/{skill_slug}")

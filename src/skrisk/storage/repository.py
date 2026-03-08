@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -679,35 +679,58 @@ class SkillRepository:
         min_weekly_installs: int | None = None,
         max_weekly_installs: int | None = None,
         sort: str | None = None,
+        query: str | None = None,
     ) -> list[dict]:
+        page = await self.list_skills_page(
+            page=1,
+            page_size=limit if limit > 0 else 0,
+            severity=severity,
+            min_weekly_installs=min_weekly_installs,
+            max_weekly_installs=max_weekly_installs,
+            sort=sort,
+            query=query,
+        )
+        return page["items"]
+
+    async def list_skills_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        severity: str | None = None,
+        min_weekly_installs: int | None = None,
+        max_weekly_installs: int | None = None,
+        sort: str | None = None,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        page = max(1, page)
+        limit = None if page_size <= 0 else page_size
+        offset = 0 if limit is None else (page - 1) * page_size
+
         async with self._session_factory() as session:
-            rows = await self._load_latest_skill_rows(session)
+            rows, total = await self._load_latest_skill_page_rows(
+                session,
+                offset=offset,
+                limit=limit,
+                severity=severity,
+                min_weekly_installs=min_weekly_installs,
+                max_weekly_installs=max_weekly_installs,
+                sort=sort,
+                query=query,
+            )
             observations_by_skill = await self._load_registry_observations(
                 session,
-                [skill_row.id for skill_row, _, _ in rows],
+                [skill_row.id for skill_row, _, _, _ in rows],
             )
-            enriched_rows = []
-            for skill_row, repo_row, snapshot_row in rows:
-                risk_report = snapshot_row.risk_report if snapshot_row is not None else {}
-                if severity is not None and risk_report.get("severity") != severity:
-                    continue
-                if min_weekly_installs is not None and (
-                    skill_row.current_weekly_installs is None
-                    or skill_row.current_weekly_installs < min_weekly_installs
-                ):
-                    continue
-                if max_weekly_installs is not None and (
-                    skill_row.current_weekly_installs is None
-                    or skill_row.current_weekly_installs > max_weekly_installs
-                ):
-                    continue
 
+            items = []
+            for skill_row, repo_row, snapshot_row, _previous_weekly_installs in rows:
                 telemetry = _build_install_telemetry(
                     skill_row=skill_row,
                     snapshot_row=snapshot_row,
                     observations=observations_by_skill.get(skill_row.id, []),
                 )
-                enriched_rows.append(
+                items.append(
                     {
                         "publisher": repo_row.publisher,
                         "repo": repo_row.repo,
@@ -736,10 +759,14 @@ class SkillRepository:
                     }
                 )
 
-            _sort_skill_listing(enriched_rows, sort=sort)
-            if limit > 0:
-                enriched_rows = enriched_rows[:limit]
-            return enriched_rows
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": 0 if limit is None else page_size,
+                "has_previous": page > 1,
+                "has_next": False if limit is None else (offset + len(items)) < total,
+            }
 
     async def list_intel_feed_runs(self, *, limit: int = 20) -> list[dict]:
         async with self._session_factory() as session:
@@ -830,6 +857,163 @@ class SkillRepository:
             .order_by(SkillSnapshot.id.desc().nulls_last(), Skill.id.desc())
         )
         return list(result.all())
+
+    async def _load_latest_skill_page_rows(
+        self,
+        session: AsyncSession,
+        *,
+        offset: int,
+        limit: int | None,
+        severity: str | None,
+        min_weekly_installs: int | None,
+        max_weekly_installs: int | None,
+        sort: str | None,
+        query: str | None,
+    ) -> tuple[list[tuple[Skill, SkillRepo, SkillSnapshot | None, int | None]], int]:
+        latest_snapshot_ids = (
+            select(
+                SkillSnapshot.skill_id.label("skill_id"),
+                func.max(SkillSnapshot.id).label("latest_snapshot_id"),
+            )
+            .group_by(SkillSnapshot.skill_id)
+            .subquery()
+        )
+        ranked_observations = (
+            select(
+                SkillRegistryObservation.skill_id.label("skill_id"),
+                SkillRegistryObservation.weekly_installs.label("weekly_installs"),
+                func.row_number()
+                .over(
+                    partition_by=SkillRegistryObservation.skill_id,
+                    order_by=(
+                        SkillRegistryObservation.observed_at.desc(),
+                        SkillRegistryObservation.id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+            .where(SkillRegistryObservation.observation_kind == "directory_fetch")
+            .subquery()
+        )
+        previous_weekly_installs = (
+            select(
+                ranked_observations.c.skill_id,
+                ranked_observations.c.weekly_installs.label("previous_weekly_installs"),
+            )
+            .where(ranked_observations.c.row_number == 2)
+            .subquery()
+        )
+
+        severity_expression = func.coalesce(
+            func.json_extract(SkillSnapshot.risk_report, "$.severity"),
+            "none",
+        )
+        risk_score_expression = cast(
+            func.coalesce(func.json_extract(SkillSnapshot.risk_report, "$.score"), 0),
+            Integer,
+        )
+        confidence_expression = func.json_extract(SkillSnapshot.risk_report, "$.confidence")
+        current_weekly_installs = Skill.current_weekly_installs
+        previous_weekly_installs_expression = previous_weekly_installs.c.previous_weekly_installs
+        growth_expression = case(
+            (
+                and_(
+                    current_weekly_installs.is_not(None),
+                    previous_weekly_installs_expression.is_not(None),
+                ),
+                current_weekly_installs - previous_weekly_installs_expression,
+            ),
+            else_=-10**9,
+        )
+        impact_expression = _impact_score_sql(
+            current_weekly_installs=current_weekly_installs,
+            previous_weekly_installs=previous_weekly_installs_expression,
+        )
+        priority_expression = _priority_score_sql(
+            risk_score=risk_score_expression,
+            severity=severity_expression,
+            confidence=confidence_expression,
+            impact_score=impact_expression,
+        )
+
+        query_stmt = (
+            select(
+                Skill,
+                SkillRepo,
+                SkillSnapshot,
+                previous_weekly_installs_expression.label("previous_weekly_installs"),
+            )
+            .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+            .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
+            .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
+            .outerjoin(
+                previous_weekly_installs,
+                previous_weekly_installs.c.skill_id == Skill.id,
+            )
+        )
+
+        if severity is not None:
+            query_stmt = query_stmt.where(severity_expression == severity)
+        if min_weekly_installs is not None:
+            query_stmt = query_stmt.where(
+                Skill.current_weekly_installs.is_not(None),
+                Skill.current_weekly_installs >= min_weekly_installs,
+            )
+        if max_weekly_installs is not None:
+            query_stmt = query_stmt.where(
+                Skill.current_weekly_installs.is_not(None),
+                Skill.current_weekly_installs <= max_weekly_installs,
+            )
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            query_pattern = f"%{normalized_query}%"
+            query_stmt = query_stmt.where(
+                or_(
+                    func.lower(SkillRepo.publisher).like(query_pattern),
+                    func.lower(SkillRepo.repo).like(query_pattern),
+                    func.lower(Skill.skill_slug).like(query_pattern),
+                    func.lower(Skill.title).like(query_pattern),
+                )
+            )
+
+        count_query = select(func.count()).select_from(query_stmt.order_by(None).subquery())
+        total = int((await session.scalar(count_query)) or 0)
+
+        if sort in {None, "priority"}:
+            query_stmt = query_stmt.order_by(
+                priority_expression.desc(),
+                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                risk_score_expression.desc(),
+                SkillSnapshot.id.desc().nullslast(),
+                Skill.id.desc(),
+            )
+        elif sort == "risk":
+            query_stmt = query_stmt.order_by(
+                risk_score_expression.desc(),
+                priority_expression.desc(),
+                SkillSnapshot.id.desc().nullslast(),
+                Skill.id.desc(),
+            )
+        elif sort == "installs":
+            query_stmt = query_stmt.order_by(
+                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                priority_expression.desc(),
+                SkillSnapshot.id.desc().nullslast(),
+                Skill.id.desc(),
+            )
+        elif sort == "growth":
+            query_stmt = query_stmt.order_by(
+                growth_expression.desc(),
+                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                SkillSnapshot.id.desc().nullslast(),
+                Skill.id.desc(),
+            )
+
+        if limit is not None:
+            query_stmt = query_stmt.offset(offset).limit(limit)
+
+        result = await session.execute(query_stmt)
+        return list(result.all()), total
 
     async def _load_registry_observations(
         self,
@@ -1073,6 +1257,76 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             reverse=True,
         )
         return
+
+
+def _impact_score_sql(*, current_weekly_installs, previous_weekly_installs):
+    base_score = case(
+        (
+            or_(
+                current_weekly_installs.is_(None),
+                current_weekly_installs <= 0,
+            ),
+            0,
+        ),
+        (current_weekly_installs < 10, 5),
+        (current_weekly_installs < 100, 15),
+        (current_weekly_installs < 1_000, 30),
+        (current_weekly_installs < 10_000, 50),
+        (current_weekly_installs < 50_000, 70),
+        else_=90,
+    )
+    ratio_expression = cast(current_weekly_installs, Float) / cast(previous_weekly_installs, Float)
+
+    return case(
+        (
+            or_(
+                current_weekly_installs.is_(None),
+                previous_weekly_installs.is_(None),
+            ),
+            base_score,
+        ),
+        (
+            previous_weekly_installs <= 0,
+            func.min(
+                100,
+                base_score
+                + case((current_weekly_installs > 0, 20), else_=0),
+            ),
+        ),
+        (ratio_expression >= 2, func.min(100, base_score + 20)),
+        (ratio_expression >= 1.1, func.min(100, base_score + 10)),
+        (ratio_expression <= 0.5, func.max(0, base_score - 10)),
+        else_=base_score,
+    )
+
+
+def _priority_score_sql(*, risk_score, severity, confidence, impact_score):
+    severity_multiplier = case(
+        (severity == "none", 0.5),
+        (severity == "low", 0.7),
+        (severity == "medium", 0.9),
+        (severity == "high", 1.0),
+        (severity == "critical", 1.1),
+        else_=1.0,
+    )
+    confidence_multiplier = case(
+        (confidence == "suspected", 0.9),
+        (confidence == "likely", 1.0),
+        (confidence == "confirmed", 1.1),
+        else_=1.0,
+    )
+    return func.round(
+        func.min(
+            100,
+            func.max(
+                0,
+                risk_score
+                * severity_multiplier
+                * confidence_multiplier
+                * (1 + (impact_score / 200.0)),
+            ),
+        )
+    )
 
 
 def _sort_weekly_installs_value(value: int | None) -> int:

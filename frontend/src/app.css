@@ -233,6 +233,10 @@ select:focus-visible {
 	align-items: start;
 }
 
+.panel-grid--overview {
+	grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
+}
+
 .metric-card,
 .panel,
 .table-card {
@@ -389,6 +393,10 @@ td code,
 	min-width: 180px;
 }
 
+.field--wide {
+	flex: 1 1 320px;
+}
+
 .field label {
 	font-size: 0.82rem;
 	color: var(--muted);
@@ -401,6 +409,52 @@ td code,
 	border: 1px solid rgba(148, 163, 184, 0.24);
 	background: rgba(255, 255, 255, 0.9);
 	color: var(--text);
+}
+
+.toolbar-actions {
+	display: flex;
+	align-items: end;
+}
+
+.action-button,
+.pagination-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 12px 16px;
+	border-radius: 999px;
+	border: 1px solid rgba(11, 132, 198, 0.2);
+	background: rgba(11, 132, 198, 0.12);
+	color: var(--accent-strong);
+	font-weight: 600;
+	transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.action-button:hover,
+.pagination-link:hover {
+	background: rgba(11, 132, 198, 0.2);
+	border-color: rgba(11, 132, 198, 0.35);
+	transform: translateY(-1px);
+}
+
+.pagination-bar {
+	margin-top: 18px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.pagination-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.pagination-link--disabled {
+	opacity: 0.55;
+	pointer-events: none;
 }
 
 .stack {

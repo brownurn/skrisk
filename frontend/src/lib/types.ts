@@ -90,6 +90,22 @@ export interface SkillSummary {
 	latestSnapshot: SkillSnapshot;
 }
 
+export interface SkillPage {
+	items: SkillSummary[];
+	total: number;
+	page: number;
+	pageSize: number;
+	hasNext: boolean;
+	hasPrevious: boolean;
+}
+
+export interface SkillsPageFilters {
+	query: string;
+	severity: SeverityLevel | 'all';
+	installBucket: 'all' | '0-9' | '10-99' | '100-999' | '1k-9.9k' | '10k+';
+	sort: 'priority' | 'installs' | 'risk' | 'growth';
+}
+
 export interface ExternalVerdict {
 	partner: string;
 	verdict: string;

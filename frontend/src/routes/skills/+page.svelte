@@ -8,14 +8,16 @@
 		priorityTone,
 		severityTone
 	} from '$lib/presenters';
-	import type { SeverityLevel, SkillSummary } from '$lib/types';
+	import type { SkillSummary, SkillsPageFilters } from '$lib/types';
 
-	let { data } = $props<{ data: { skills: SkillSummary[] } }>();
+	let {
+		data
+	} = $props<{ data: { page: { items: SkillSummary[]; total: number; page: number; pageSize: number; hasNext: boolean; hasPrevious: boolean }; filters: SkillsPageFilters } }>();
 
-	type InstallBucket = 'all' | '0-9' | '10-99' | '100-999' | '1k-9.9k' | '10k+';
-	type SortMode = 'priority' | 'installs';
+	type InstallBucket = SkillsPageFilters['installBucket'];
+	type SortMode = SkillsPageFilters['sort'];
 
-	const severityOptions: Array<{ label: string; value: SeverityLevel | 'all' }> = [
+	const severityOptions: Array<{ label: string; value: SkillsPageFilters['severity'] }> = [
 		{ label: 'All severities', value: 'all' },
 		{ label: 'Critical', value: 'critical' },
 		{ label: 'High', value: 'high' },
@@ -35,93 +37,50 @@
 
 	const sortOptions: Array<{ label: string; value: SortMode }> = [
 		{ label: 'Priority', value: 'priority' },
-		{ label: 'Weekly installs', value: 'installs' }
+		{ label: 'Weekly installs', value: 'installs' },
+		{ label: 'Risk score', value: 'risk' },
+		{ label: 'Growth', value: 'growth' }
 	];
 
-	let query = $state('');
-	let severityFilter = $state<SeverityLevel | 'all'>('all');
-	let installBucketFilter = $state<InstallBucket>('all');
-	let sortMode = $state<SortMode>('priority');
-
-	const totalWeeklyInstalls = $derived(
-		data.skills.reduce(
+	const pageWeeklyInstalls = $derived.by(() =>
+		data.page.items.reduce(
 			(total: number, skill: SkillSummary) => total + (skill.currentWeeklyInstalls ?? 0),
 			0
 		)
 	);
+	const pagePriorityCount = $derived.by(
+		() => data.page.items.filter((skill: SkillSummary) => skill.priorityScore >= 80).length
+	);
+	const pageTenKInstalls = $derived.by(
+		() =>
+			data.page.items.filter(
+				(skill: SkillSummary) => (skill.currentWeeklyInstalls ?? 0) >= 10_000
+			).length
+	);
+	const pageStart = $derived.by(() =>
+		data.page.total === 0 ? 0 : (data.page.page - 1) * data.page.pageSize + 1
+	);
+	const pageEnd = $derived.by(() =>
+		data.page.total === 0 ? 0 : pageStart + data.page.items.length - 1
+	);
 
-	function matchesInstallBucket(weeklyInstalls: number | null, bucket: InstallBucket): boolean {
-		if (bucket === 'all') {
-			return true;
+	function buildPageHref(pageNumber: number): string {
+		const params = new URLSearchParams();
+		params.set('page', String(pageNumber));
+		if (data.filters.query) {
+			params.set('q', data.filters.query);
 		}
-
-		if (weeklyInstalls === null) {
-			return false;
+		if (data.filters.severity !== 'all') {
+			params.set('severity', data.filters.severity);
 		}
-
-		switch (bucket) {
-			case '0-9':
-				return weeklyInstalls >= 0 && weeklyInstalls < 10;
-			case '10-99':
-				return weeklyInstalls >= 10 && weeklyInstalls < 100;
-			case '100-999':
-				return weeklyInstalls >= 100 && weeklyInstalls < 1_000;
-			case '1k-9.9k':
-				return weeklyInstalls >= 1_000 && weeklyInstalls < 10_000;
-			case '10k+':
-				return weeklyInstalls >= 10_000;
-			default:
-				return true;
+		if (data.filters.installBucket !== 'all') {
+			params.set('installs', data.filters.installBucket);
 		}
+		if (data.filters.sort !== 'priority') {
+			params.set('sort', data.filters.sort);
+		}
+		return `/skills?${params.toString()}`;
 	}
-
-	const filteredSkills = $derived.by(() => {
-		const normalizedQuery = query.trim().toLowerCase();
-
-		return [...data.skills]
-			.filter((skill) => {
-				if (severityFilter !== 'all' && skill.latestSnapshot.riskReport.severity !== severityFilter) {
-					return false;
-				}
-
-				if (!matchesInstallBucket(skill.currentWeeklyInstalls, installBucketFilter)) {
-					return false;
-				}
-
-				if (!normalizedQuery) {
-					return true;
-				}
-
-				const haystack = [
-					skill.publisher,
-					skill.repo,
-					skill.skillSlug,
-					skill.title,
-					String(skill.priorityScore),
-					String(skill.currentWeeklyInstalls ?? ''),
-					...skill.latestSnapshot.riskReport.categories,
-					...skill.latestSnapshot.extractedDomains
-				]
-					.join(' ')
-					.toLowerCase();
-
-				return haystack.includes(normalizedQuery);
-			})
-			.sort((left, right) => {
-				if (sortMode === 'installs') {
-					return (
-						(right.currentWeeklyInstalls ?? -1) - (left.currentWeeklyInstalls ?? -1) ||
-						right.priorityScore - left.priorityScore
-					);
-				}
-
-				return (
-					right.priorityScore - left.priorityScore ||
-					(right.currentWeeklyInstalls ?? -1) - (left.currentWeeklyInstalls ?? -1) ||
-					right.latestSnapshot.riskReport.score - left.latestSnapshot.riskReport.score
-				);
-			});
-	});
 </script>
 
 <section class="hero hero--compact">
@@ -130,31 +89,31 @@
 			<p class="section-eyebrow">Registry-wide analyst view</p>
 			<h1>Skills registry</h1>
 			<p>
-				Prioritize the skills combining suspicious behavior with meaningful install reach.
-				Filters stay local and keyboard-friendly for fast analyst triage.
+				The queue now pages from the server instead of loading the entire registry into the
+				browser. Filters are URL-driven so analysts can share exact slices of the corpus.
 			</p>
 		</div>
 
 		<div class="hero-panel stack">
 			<div class="kpi-line">
-				<span class="muted">Tracked skills</span>
-				<strong>{data.skills.length}</strong>
+				<span class="muted">Matching skills</span>
+				<strong>{data.page.total}</strong>
 			</div>
 			<div class="kpi-line">
-				<span class="muted">Total weekly installs</span>
-				<strong>{formatWeeklyInstalls(totalWeeklyInstalls)}</strong>
+				<span class="muted">Showing</span>
+				<strong>{pageStart}-{pageEnd}</strong>
 			</div>
 			<div class="kpi-line">
-				<span class="muted">Priority 80+</span>
-				<strong>{data.skills.filter((skill: SkillSummary) => skill.priorityScore >= 80).length}</strong>
+				<span class="muted">Current page installs</span>
+				<strong>{formatWeeklyInstalls(pageWeeklyInstalls)}</strong>
 			</div>
 			<div class="kpi-line">
-				<span class="muted">10k+ weekly</span>
-				<strong>{data.skills.filter((skill: SkillSummary) => (skill.currentWeeklyInstalls ?? 0) >= 10_000).length}</strong>
+				<span class="muted">Priority 80+ on page</span>
+				<strong>{pagePriorityCount}</strong>
 			</div>
 			<div class="kpi-line">
-				<span class="muted">Intel-backed</span>
-				<strong>{data.skills.filter((skill: SkillSummary) => skill.latestSnapshot.riskReport.indicatorMatches.length > 0).length}</strong>
+				<span class="muted">10k+ installs on page</span>
+				<strong>{pageTenKInstalls}</strong>
 			</div>
 		</div>
 	</div>
@@ -168,55 +127,54 @@
 		</div>
 	</div>
 
-	<div class="toolbar" role="search">
-		<div class="field">
+	<form class="toolbar" role="search" method="GET" action="/skills">
+		<div class="field field--wide">
 			<label for="skills-query">Search skills</label>
 			<input
 				id="skills-query"
-				name="skills-query"
+				name="q"
 				aria-label="Search skills"
 				type="search"
-				bind:value={query}
-				placeholder="publisher / repo / domain / category"
+				value={data.filters.query}
+				placeholder="publisher / repo / skill title"
 			/>
 		</div>
 		<div class="field">
 			<label for="skills-severity">Severity</label>
-			<select
-				id="skills-severity"
-				name="skills-severity"
-				aria-label="Severity"
-				bind:value={severityFilter}
-			>
+			<select id="skills-severity" name="severity" aria-label="Severity">
 				{#each severityOptions as option}
-					<option value={option.value}>{option.label}</option>
+					<option value={option.value} selected={data.filters.severity === option.value}>
+						{option.label}
+					</option>
 				{/each}
 			</select>
 		</div>
 		<div class="field">
 			<label for="skills-installs">Weekly installs</label>
-			<select
-				id="skills-installs"
-				name="skills-installs"
-				aria-label="Weekly installs"
-				bind:value={installBucketFilter}
-			>
+			<select id="skills-installs" name="installs" aria-label="Weekly installs">
 				{#each installBucketOptions as option}
-					<option value={option.value}>{option.label}</option>
+					<option value={option.value} selected={data.filters.installBucket === option.value}>
+						{option.label}
+					</option>
 				{/each}
 			</select>
 		</div>
 		<div class="field">
 			<label for="skills-sort">Sort by</label>
-			<select id="skills-sort" name="skills-sort" aria-label="Sort by" bind:value={sortMode}>
+			<select id="skills-sort" name="sort" aria-label="Sort by">
 				{#each sortOptions as option}
-					<option value={option.value}>{option.label}</option>
+					<option value={option.value} selected={data.filters.sort === option.value}>
+						{option.label}
+					</option>
 				{/each}
 			</select>
 		</div>
-	</div>
+		<div class="toolbar-actions">
+			<button class="action-button" type="submit">Apply filters</button>
+		</div>
+	</form>
 
-	{#if filteredSkills.length > 0}
+	{#if data.page.items.length > 0}
 		<div class="table-wrap">
 			<table>
 				<thead>
@@ -232,7 +190,7 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#each filteredSkills as skill}
+					{#each data.page.items as skill}
 						<tr>
 							<td>
 								<a class="inline-link" href={buildSkillHref(skill)}>
@@ -268,6 +226,23 @@
 					{/each}
 				</tbody>
 			</table>
+		</div>
+
+		<div class="pagination-bar">
+			<p class="muted">Page {data.page.page} · showing {pageStart}-{pageEnd} of {data.page.total}</p>
+			<div class="pagination-actions">
+				{#if data.page.hasPrevious}
+					<a class="pagination-link" href={buildPageHref(data.page.page - 1)}>Previous page</a>
+				{:else}
+					<span class="pagination-link pagination-link--disabled">Previous page</span>
+				{/if}
+
+				{#if data.page.hasNext}
+					<a class="pagination-link" href={buildPageHref(data.page.page + 1)}>Next page</a>
+				{:else}
+					<span class="pagination-link pagination-link--disabled">Next page</span>
+				{/if}
+			</div>
 		</div>
 	{:else}
 		<div class="empty-state">No skills match the current filter set.</div>

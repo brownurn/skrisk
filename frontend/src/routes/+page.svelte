@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { firstDomain, severityTone } from '$lib/presenters';
+	import { firstDomain, formatWeeklyInstalls, severityTone } from '$lib/presenters';
 	import type { OverviewData } from '$lib/types';
 
 	let { data } = $props<{ data: OverviewData }>();
@@ -59,7 +59,7 @@
 	</article>
 </section>
 
-<section class="panel-grid">
+<section class="panel-grid panel-grid--overview">
 	<div class="table-card">
 		<div class="table-header">
 			<div>
@@ -75,6 +75,7 @@
 					<thead>
 						<tr>
 							<th>Skill</th>
+							<th>Weekly Installs</th>
 							<th>Severity</th>
 							<th>Top Domain</th>
 						</tr>
@@ -90,6 +91,7 @@
 										{skill.publisher}/{skill.repo}/{skill.skillSlug}
 									</a>
 								</td>
+								<td class="mono">{formatWeeklyInstalls(skill.currentWeeklyInstalls)}</td>
 								<td>
 									<span
 										class="badge"

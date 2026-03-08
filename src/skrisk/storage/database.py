@@ -65,3 +65,22 @@ def _run_sqlite_additive_migrations(connection) -> None:
         if column_name in existing_columns:
             continue
         connection.execute(text(f"ALTER TABLE skills ADD COLUMN {column_name} {column_type}"))
+
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_skill_registry_observations_skill_observed "
+            "ON skill_registry_observations (skill_id, observed_at DESC, id DESC)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_skill_registry_observations_skill_kind_observed "
+            "ON skill_registry_observations (skill_id, observation_kind, observed_at DESC, id DESC)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_skill_snapshots_skill_latest "
+            "ON skill_snapshots (skill_id, id DESC)"
+        )
+    )

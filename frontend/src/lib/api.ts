@@ -13,6 +13,7 @@ import type {
 	RiskFinding,
 	RiskReport,
 	SkillDetail,
+	SkillPage,
 	SkillIndicatorLink,
 	SkillSnapshot,
 	SkillSummary,
@@ -161,6 +162,21 @@ function normalizeSkillSummary(raw: Record<string, unknown>): SkillSummary {
 	};
 }
 
+function normalizeSkillPage(raw: Record<string, unknown>): SkillPage {
+	const items = Array.isArray(raw.items)
+		? raw.items.map((item) => normalizeSkillSummary(item as Record<string, unknown>))
+		: [];
+
+	return {
+		items,
+		total: Number(raw.total ?? items.length),
+		page: Number(raw.page ?? 1),
+		pageSize: Number(raw.page_size ?? items.length),
+		hasNext: Boolean(raw.has_next),
+		hasPrevious: Boolean(raw.has_previous)
+	};
+}
+
 function normalizeInstallHistoryEntry(raw: Record<string, unknown>): InstallHistoryEntry {
 	return {
 		id: Number(raw.id ?? 0),
@@ -271,12 +287,40 @@ export async function loadOverview(fetcher: Fetcher): Promise<OverviewData> {
 	};
 }
 
-export async function loadSkills(fetcher: Fetcher): Promise<SkillSummary[]> {
-	const rawSkills = await requestJson<Record<string, unknown>[]>(
+export async function loadSkillsPage(
+	fetcher: Fetcher,
+	params: {
+		page: number;
+		pageSize: number;
+		sort: 'priority' | 'installs' | 'risk' | 'growth';
+		severity?: 'critical' | 'high' | 'medium' | 'low' | 'none';
+		query?: string;
+		minWeeklyInstalls?: number;
+		maxWeeklyInstalls?: number;
+	}
+): Promise<SkillPage> {
+	const searchParams = new URLSearchParams();
+	searchParams.set('page', String(params.page));
+	searchParams.set('page_size', String(params.pageSize));
+	searchParams.set('sort', params.sort);
+	if (params.severity) {
+		searchParams.set('severity', params.severity);
+	}
+	if (params.query) {
+		searchParams.set('q', params.query);
+	}
+	if (params.minWeeklyInstalls !== undefined) {
+		searchParams.set('min_weekly_installs', String(params.minWeeklyInstalls));
+	}
+	if (params.maxWeeklyInstalls !== undefined) {
+		searchParams.set('max_weekly_installs', String(params.maxWeeklyInstalls));
+	}
+
+	const rawPage = await requestJson<Record<string, unknown>>(
 		fetcher,
-		'/api/skills?limit=0&sort=priority'
+		`/api/skills/page?${searchParams.toString()}`
 	);
-	return rawSkills.map((item) => normalizeSkillSummary(item));
+	return normalizeSkillPage(rawPage);
 }
 
 export async function loadSkillDetail(

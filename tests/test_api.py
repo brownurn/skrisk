@@ -610,6 +610,71 @@ async def test_api_skills_growth_sort_keeps_zero_above_missing_telemetry(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_api_skills_page_supports_server_side_pagination_and_search(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'skills-page.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="melurna",
+        repo="skill-pack",
+        source_url="https://github.com/melurna/skill-pack",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=3,
+    )
+
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="alpha-agent",
+        risk_report={"severity": "high", "score": 85, "confidence": "likely"},
+        install_history=[(datetime(2026, 3, 7, 8, 0, tzinfo=UTC), 2200, 1)],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="beta-agent",
+        risk_report={"severity": "medium", "score": 70, "confidence": "likely"},
+        install_history=[(datetime(2026, 3, 7, 8, 0, tzinfo=UTC), 1800, 2)],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="gamma-safe",
+        risk_report={"severity": "low", "score": 10, "confidence": "likely"},
+        install_history=[(datetime(2026, 3, 7, 8, 0, tzinfo=UTC), 50, 3)],
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            "/api/skills/page?page=2&page_size=1&sort=installs&q=agent&min_weekly_installs=1000"
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["page"] == 2
+    assert payload["page_size"] == 1
+    assert payload["has_previous"] is True
+    assert payload["has_next"] is False
+    assert [item["skill_slug"] for item in payload["items"]] == ["beta-agent"]
+
+
+@pytest.mark.asyncio
 async def test_app_serves_built_frontend_for_non_api_routes(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'frontend.db'}"
     session_factory = create_sqlite_session_factory(database_url)
