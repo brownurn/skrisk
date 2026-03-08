@@ -1055,7 +1055,7 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
         rows.sort(
             key=lambda item: (
                 item["weekly_installs_delta"] if item["weekly_installs_delta"] is not None else -10**9,
-                item["current_weekly_installs"] or -1,
+                _sort_weekly_installs_value(item["current_weekly_installs"]),
                 item["latest_snapshot"]["id"],
             ),
             reverse=True,

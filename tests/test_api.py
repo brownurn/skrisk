@@ -481,6 +481,81 @@ async def test_api_skills_install_sort_keeps_zero_above_missing_telemetry(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_api_skills_growth_sort_keeps_zero_above_missing_telemetry(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'growth-ordering.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=3,
+    )
+
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="positive-growth",
+        risk_report={"severity": "low", "score": 15, "confidence": "likely"},
+        install_history=[
+            (datetime(2026, 3, 6, 8, 0, tzinfo=UTC), 1, 3),
+            (datetime(2026, 3, 7, 8, 0, tzinfo=UTC), 5, 2),
+        ],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="zero-installs",
+        risk_report={"severity": "low", "score": 10, "confidence": "likely"},
+        install_history=[
+            (datetime(2026, 3, 7, 8, 0, tzinfo=UTC), 0, 4),
+        ],
+    )
+    missing_skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="unknown-installs",
+        title="unknown-installs",
+        relative_path="skills/unknown-installs",
+        registry_url="https://skills.sh/tul-sh/skills/unknown-installs",
+    )
+    await repository.record_skill_snapshot(
+        skill_id=missing_skill_id,
+        repo_snapshot_id=repo_snapshot_id,
+        folder_hash="hash-unknown-installs",
+        version_label="main@abc123",
+        skill_text="name: unknown-installs",
+        referenced_files=["SKILL.md"],
+        extracted_domains=[],
+        risk_report={"severity": "critical", "score": 90, "confidence": "likely"},
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        growth_response = await client.get("/api/skills?limit=0&sort=growth")
+
+    assert growth_response.status_code == 200
+    assert [item["skill_slug"] for item in growth_response.json()] == [
+        "positive-growth",
+        "zero-installs",
+        "unknown-installs",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_app_serves_built_frontend_for_non_api_routes(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'frontend.db'}"
     session_factory = create_sqlite_session_factory(database_url)
