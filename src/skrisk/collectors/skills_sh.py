@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from xml.etree import ElementTree
 
 
@@ -43,6 +44,16 @@ class AuditRow:
     skill_slug: str
     name: str
     partners: dict[str, PartnerVerdict] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class DirectoryPage:
+    """A single paginated directory response from the skills.sh API."""
+
+    page: int
+    total: int
+    has_more: bool
+    entries: list[SkillSitemapEntry]
 
 
 def parse_sitemap(xml: str) -> list[SkillSitemapEntry]:
@@ -99,6 +110,40 @@ def extract_audit_rows(html: str) -> list[AuditRow]:
     return rows
 
 
+def parse_directory_page(
+    payload: dict[str, Any],
+    *,
+    base_url: str = "https://skills.sh",
+) -> DirectoryPage:
+    """Normalize a paginated `/api/skills/<view>/<page>` response."""
+
+    base_url = base_url.rstrip("/")
+    entries: list[SkillSitemapEntry] = []
+
+    for raw_skill in payload.get("skills", []):
+        source = str(raw_skill.get("source") or "")
+        publisher, repo = _split_source(source)
+        skill_slug = str(raw_skill.get("skillId") or "").strip()
+        if not publisher or not repo or not skill_slug:
+            continue
+
+        entries.append(
+            SkillSitemapEntry(
+                publisher=publisher,
+                repo=repo,
+                skill_slug=skill_slug,
+                url=f"{base_url}/{publisher}/{repo}/{skill_slug}",
+            )
+        )
+
+    return DirectoryPage(
+        page=int(payload.get("page") or 0),
+        total=int(payload.get("total") or len(entries)),
+        has_more=bool(payload.get("hasMore")),
+        entries=entries,
+    )
+
+
 def _split_source(source: str) -> tuple[str, str]:
     parts = source.split("/", 1)
     if len(parts) == 2:
@@ -122,4 +167,3 @@ def _partner_verdict(partner: str, payload: dict | None) -> PartnerVerdict:
         alert_count=int(result.get("alertCount") or 0),
         analyzed_at=payload.get("analyzedAt"),
     )
-

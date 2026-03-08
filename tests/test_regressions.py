@@ -9,9 +9,9 @@ from sqlalchemy import func, select
 from skrisk.analysis.analyzer import SkillAnalyzer
 from skrisk.collectors.github import discover_skills_in_checkout, mirror_repo_snapshot
 from skrisk.collectors.skills_sh import AuditRow, SkillSitemapEntry
-from skrisk.services.sync import RegistrySyncService
+from skrisk.services.sync import LoadedSkillFiles, RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
-from skrisk.storage.models import SkillRepoSnapshot, SkillSnapshot
+from skrisk.storage.models import Skill, SkillRepoSnapshot, SkillSnapshot
 from skrisk.storage.repository import SkillRepository
 
 
@@ -88,10 +88,11 @@ async def test_registry_sync_allows_repeated_rescans_of_unchanged_skill(tmp_path
         )
     ]
 
-    async def loader(_: SkillSitemapEntry) -> tuple[str, dict[str, str]]:
-        return (
-            "abc123",
-            {
+    async def loader(_: SkillSitemapEntry) -> LoadedSkillFiles:
+        return LoadedSkillFiles(
+            commit_sha="abc123",
+            relative_path=".agents/skills/agent-tools",
+            files={
                 "SKILL.md": """
                 ---
                 name: agent-tools
@@ -152,12 +153,13 @@ async def test_registry_sync_creates_one_repo_snapshot_per_repo_and_isolates_fai
         ),
     ]
 
-    async def loader(entry: SkillSitemapEntry) -> tuple[str, dict[str, str]]:
+    async def loader(entry: SkillSitemapEntry) -> LoadedSkillFiles:
         if entry.skill_slug == "broken-skill":
             raise FileNotFoundError("missing skill")
-        return (
-            "def456",
-            {
+        return LoadedSkillFiles(
+            commit_sha="def456",
+            relative_path=f".agents/skills/{entry.skill_slug}",
+            files={
                 "SKILL.md": f"---\nname: {entry.skill_slug}\ndescription: skill\n---\n",
             },
         )
@@ -171,9 +173,20 @@ async def test_registry_sync_creates_one_repo_snapshot_per_repo_and_isolates_fai
     async with session_factory() as session:
         repo_snapshot_count = await session.scalar(select(func.count()).select_from(SkillRepoSnapshot))
         skill_snapshot_count = await session.scalar(select(func.count()).select_from(SkillSnapshot))
+        skill_count = await session.scalar(select(func.count()).select_from(Skill))
+
+    repository = SkillRepository(session_factory)
+    broken_detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="broken-skill",
+    )
 
     assert summary["repos_seen"] == 1
     assert summary["skills_seen"] == 2
     assert summary["skills_failed"] == 1
     assert repo_snapshot_count == 1
+    assert skill_count == 3
     assert skill_snapshot_count == 2
+    assert broken_detail is not None
+    assert broken_detail["latest_snapshot"] is None

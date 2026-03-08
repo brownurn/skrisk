@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import pytest
+
 from skrisk.collectors.github import discover_skills_in_checkout
-from skrisk.collectors.skills_sh import extract_audit_rows, parse_sitemap
+from skrisk.collectors.skills_sh import extract_audit_rows, parse_directory_page, parse_sitemap
+from skrisk.services.sync import SkillsShClient
 
 
 def test_parse_sitemap_extracts_skill_coordinates() -> None:
@@ -71,6 +75,174 @@ def test_extract_audit_rows_reads_partner_verdicts_from_html_payload() -> None:
     assert row.partners["snyk"].verdict == "CRITICAL"
 
 
+def test_parse_directory_page_extracts_registry_entries() -> None:
+    payload = {
+        "page": 0,
+        "total": 401,
+        "hasMore": True,
+        "skills": [
+            {
+                "source": "tul-sh/skills",
+                "skillId": "agent-tools",
+                "name": "agent-tools",
+                "installs": 1234,
+            },
+            {
+                "source": "vercel-labs/agent-skills",
+                "skillId": "frontend-design",
+                "name": "frontend-design",
+                "installs": 567,
+            },
+        ],
+    }
+
+    page = parse_directory_page(payload)
+
+    assert page.page == 0
+    assert page.total == 401
+    assert page.has_more is True
+    assert [entry.publisher for entry in page.entries] == ["tul-sh", "vercel-labs"]
+    assert [entry.repo for entry in page.entries] == ["skills", "agent-skills"]
+    assert [entry.skill_slug for entry in page.entries] == ["agent-tools", "frontend-design"]
+    assert page.entries[0].url == "https://skills.sh/tul-sh/skills/agent-tools"
+
+
+@pytest.mark.asyncio
+async def test_skills_sh_client_fetch_snapshot_pages_through_directory_api() -> None:
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/skills/all-time/0":
+            return httpx.Response(
+                200,
+                json={
+                    "page": 0,
+                    "total": 3,
+                    "hasMore": True,
+                    "skills": [
+                        {
+                            "source": "tul-sh/skills",
+                            "skillId": "agent-tools",
+                            "name": "agent-tools",
+                            "installs": 100,
+                        },
+                        {
+                            "source": "vercel-labs/skills",
+                            "skillId": "find-skills",
+                            "name": "find-skills",
+                            "installs": 90,
+                        },
+                    ],
+                },
+            )
+        if request.url.path == "/api/skills/all-time/1":
+            return httpx.Response(
+                200,
+                json={
+                    "page": 1,
+                    "total": 3,
+                    "hasMore": False,
+                    "skills": [
+                        {
+                            "source": "anthropics/skills",
+                            "skillId": "frontend-design",
+                            "name": "frontend-design",
+                            "installs": 80,
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/audits":
+            return httpx.Response(
+                200,
+                text="""
+                <script>
+                window.__DATA__ = {
+                  "rows": [
+                    {
+                      "rank": 1,
+                      "source": "tul-sh/skills",
+                      "skillId": "agent-tools",
+                      "name": "agent-tools",
+                      "snyk": {
+                        "result": { "overall_risk_level": "HIGH" },
+                        "analyzedAt": "2026-03-05T08:31:28.415042+00:00"
+                      }
+                    }
+                  ],
+                  "totalRows": 1
+                };
+                </script>
+                """,
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://skills.sh") as client:
+        snapshot = await SkillsShClient("https://skills.sh").fetch_snapshot(client)
+
+    assert requested_paths[0] in {"/api/skills/all-time/0", "/audits"}
+    assert set(requested_paths) == {
+        "/api/skills/all-time/0",
+        "/api/skills/all-time/1",
+        "/audits",
+    }
+    assert snapshot.total_skills == 3
+    assert [entry.skill_slug for entry in snapshot.sitemap_entries] == [
+        "agent-tools",
+        "find-skills",
+        "frontend-design",
+    ]
+    assert snapshot.audit_rows[0].partners["snyk"].verdict == "HIGH"
+
+
+@pytest.mark.asyncio
+async def test_skills_sh_client_retries_rate_limited_directory_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = {"page_0": 0}
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/skills/all-time/0":
+            attempts["page_0"] += 1
+            if attempts["page_0"] == 1:
+                return httpx.Response(429, text="Too Many Requests")
+            return httpx.Response(
+                200,
+                json={
+                    "page": 0,
+                    "total": 1,
+                    "hasMore": False,
+                    "skills": [
+                        {
+                            "source": "tul-sh/skills",
+                            "skillId": "agent-tools",
+                            "name": "agent-tools",
+                            "installs": 100,
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/audits":
+            return httpx.Response(200, text="<html></html>")
+        return httpx.Response(404)
+
+    monkeypatch.setattr("skrisk.services.sync.asyncio.sleep", fake_sleep)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://skills.sh") as client:
+        snapshot = await SkillsShClient("https://skills.sh").fetch_snapshot(client)
+
+    assert attempts["page_0"] == 2
+    assert slept == [30.0]
+    assert snapshot.total_skills == 1
+    assert [entry.skill_slug for entry in snapshot.sitemap_entries] == ["agent-tools"]
+
+
 def test_discover_skills_in_checkout_finds_supported_skill_locations(
     tmp_path: Path,
 ) -> None:
@@ -90,4 +262,3 @@ def test_discover_skills_in_checkout_finds_supported_skill_locations(
     assert [skill.slug for skill in discovered] == ["skill-a", "skill-b"]
     assert discovered[0].relative_path == "skills/.system/skill-a"
     assert discovered[1].relative_path == ".agents/skills/skill-b"
-

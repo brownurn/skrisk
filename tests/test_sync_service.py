@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from skrisk.analysis.analyzer import SkillAnalyzer
+from skrisk.collectors.github import DiscoveredSkill
 from skrisk.collectors.github import load_skill_files
 from skrisk.collectors.skills_sh import AuditRow, PartnerVerdict, SkillSitemapEntry
-from skrisk.services.sync import RegistrySyncService
+from skrisk.services.sync import GitHubSkillLoader, LoadedSkillFiles, RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
 from skrisk.storage.repository import SkillRepository
 
@@ -73,10 +74,11 @@ async def test_registry_sync_service_persists_repo_skill_snapshot_and_verdicts(
         )
     ]
 
-    async def loader(_: SkillSitemapEntry) -> tuple[str, dict[str, str]]:
-        return (
-            "abc123",
-            {
+    async def loader(_: SkillSitemapEntry) -> LoadedSkillFiles:
+        return LoadedSkillFiles(
+            commit_sha="abc123",
+            relative_path=".agents/skills/agent-tools",
+            files={
                 "SKILL.md": """
                 ---
                 name: agent-tools
@@ -109,3 +111,103 @@ async def test_registry_sync_service_persists_repo_skill_snapshot_and_verdicts(
     assert detail["latest_snapshot"]["folder_hash"]
     assert detail["external_verdicts"][0]["partner"] == "agent_trust_hub"
     assert detail["latest_snapshot"]["risk_report"]["severity"] == "critical"
+    assert detail["relative_path"] == ".agents/skills/agent-tools"
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_service_can_seed_registry_without_repo_analysis(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'seed.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    service = RegistrySyncService(
+        session_factory=session_factory,
+        analyzer=SkillAnalyzer(),
+    )
+
+    entries = [
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skills.sh/tul-sh/skills/agent-tools",
+        ),
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="second-skill",
+            url="https://skills.sh/tul-sh/skills/second-skill",
+        ),
+    ]
+
+    summary = await service.seed_registry_snapshot(
+        sitemap_entries=entries,
+        audit_rows=[],
+    )
+
+    repository = SkillRepository(session_factory)
+    stats = await repository.get_dashboard_stats()
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
+
+    assert summary["repos_seeded"] == 1
+    assert summary["skills_seeded"] == 2
+    assert stats["tracked_repos"] == 1
+    assert stats["tracked_skills"] == 2
+    assert detail is not None
+    assert detail["latest_snapshot"] is None
+
+
+@pytest.mark.asyncio
+async def test_github_skill_loader_mirrors_repo_once_per_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"mirror": 0, "discover": 0, "load": 0}
+
+    def fake_mirror_repo_snapshot(*, source_url: str, destination: Path) -> tuple[Path, str]:
+        calls["mirror"] += 1
+        return destination, "abc123"
+
+    def fake_discover_skills_in_checkout(_: Path) -> list[DiscoveredSkill]:
+        calls["discover"] += 1
+        return [
+            DiscoveredSkill(slug="skill-one", relative_path=".agents/skills/skill-one"),
+            DiscoveredSkill(slug="skill-two", relative_path=".agents/skills/skill-two"),
+        ]
+
+    def fake_load_skill_files(skill_root: Path) -> dict[str, str]:
+        calls["load"] += 1
+        return {"SKILL.md": f"name: {skill_root.name}"}
+
+    monkeypatch.setattr("skrisk.services.sync.mirror_repo_snapshot", fake_mirror_repo_snapshot)
+    monkeypatch.setattr("skrisk.services.sync.discover_skills_in_checkout", fake_discover_skills_in_checkout)
+    monkeypatch.setattr("skrisk.services.sync.load_skill_files", fake_load_skill_files)
+
+    loader = GitHubSkillLoader(tmp_path)
+    first = await loader(
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="skill-one",
+            url="https://skills.sh/tul-sh/skills/skill-one",
+        )
+    )
+    second = await loader(
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="skill-two",
+            url="https://skills.sh/tul-sh/skills/skill-two",
+        )
+    )
+
+    assert first.commit_sha == "abc123"
+    assert first.relative_path == ".agents/skills/skill-one"
+    assert second.relative_path == ".agents/skills/skill-two"
+    assert calls == {"mirror": 1, "discover": 1, "load": 2}

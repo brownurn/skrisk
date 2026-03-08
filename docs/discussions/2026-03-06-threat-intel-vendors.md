@@ -22,6 +22,16 @@ Date: 2026-03-06
 
 The feeds are also available as full exports, which fits the SK Risk archive-and-normalize model better than lookup-only APIs.
 
+Operational note from `2026-03-07`:
+
+- the live full ZIP exports were intermittently malformed during implementation
+- SK Risk now keeps the full-export path as the primary mode
+- when those exports are malformed, SK Risk falls back to the official recent/API surfaces:
+  - URLhaus recent URLs
+  - ThreatFox recent IOCs
+
+That keeps the intel layer populated even when the bulk dumps are temporarily unusable.
+
 ## VirusTotal Policy
 
 VT is valuable, but the quota is limited enough that it must be treated as a triage layer, not a background bulk feed.

@@ -13,6 +13,8 @@ def test_cli_help_lists_operational_commands() -> None:
     assert result.exit_code == 0
     assert "enrich-vt" in result.output
     assert "init-db" in result.output
+    assert "scan-due" in result.output
+    assert "seed-registry" in result.output
     assert "sync-intel" in result.output
     assert "sync-registry" in result.output
     assert "serve" in result.output
@@ -97,3 +99,56 @@ def test_enrich_vt_cli_rejects_non_positive_limits() -> None:
 
     assert result.exit_code != 0
     assert "0" in result.output
+
+
+def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKRISK_MIRROR_ROOT", str(tmp_path / "mirrors"))
+
+    async def fake_list_due_repos(self, *, now=None):
+        return [
+            {
+                "id": 10,
+                "publisher": "tul-sh",
+                "repo": "skills",
+                "source_url": "https://github.com/tul-sh/skills",
+                "registry_rank": 1,
+            }
+        ]
+
+    async def fake_list_registry_entries_for_repo_ids(self, repo_ids):
+        assert repo_ids == [10]
+        return [
+            {
+                "publisher": "tul-sh",
+                "repo": "skills",
+                "skill_slug": "agent-tools",
+                "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
+            }
+        ]
+
+    async def fake_ingest_registry_snapshot(self, *, sitemap_entries, audit_rows, skill_loader):
+        assert len(sitemap_entries) == 1
+        assert sitemap_entries[0].skill_slug == "agent-tools"
+        assert audit_rows == []
+        return {"skills_seen": 1, "repos_seen": 1, "skills_failed": 0}
+
+    async def fail_fetch_snapshot(self, client=None):
+        raise AssertionError("scan-due should not fetch the full registry")
+
+    monkeypatch.setattr("skrisk.storage.repository.SkillRepository.list_due_repos", fake_list_due_repos)
+    monkeypatch.setattr(
+        "skrisk.storage.repository.SkillRepository.list_registry_entries_for_repo_ids",
+        fake_list_registry_entries_for_repo_ids,
+    )
+    monkeypatch.setattr(
+        "skrisk.services.sync.RegistrySyncService.ingest_registry_snapshot",
+        fake_ingest_registry_snapshot,
+    )
+    monkeypatch.setattr("skrisk.services.sync.SkillsShClient.fetch_snapshot", fail_fetch_snapshot)
+
+    result = runner.invoke(cli, ["scan-due", "--limit-repos", "1"])
+
+    assert result.exit_code == 0
+    assert "Scanned 1 skills across 1 repos" in result.output

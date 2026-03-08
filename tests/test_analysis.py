@@ -99,3 +99,27 @@ def test_analyzer_extracts_indicator_inventory_and_behavior_score() -> None:
     assert ("url", "https://bad.example/install.sh") in extracted
     assert ("domain", "bad.example") in extracted
     assert report.behavior_score > 0
+
+
+def test_analyzer_tolerates_markdown_url_labels_that_embed_links() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "AGENTS.md": """
+        Reference: [https://example.com](https://example.com)
+        Reference: [Link](https://second.example/path)
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="vercel-labs",
+        repo="agent-skills",
+        skill_slug="react-native-skills",
+        files=files,
+    )
+
+    extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
+
+    assert ("url", "https://example.com") in extracted
+    assert ("domain", "example.com") in extracted
+    assert ("url", "https://second.example/path") in extracted
+    assert ("domain", "second.example") in extracted

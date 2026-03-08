@@ -4,7 +4,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from skrisk.collectors.abusech import parse_threatfox_archive, parse_urlhaus_archive, write_archive_manifest
+from skrisk.collectors.abusech import (
+    parse_threatfox_archive,
+    parse_threatfox_recent_payload,
+    parse_urlhaus_archive,
+    parse_urlhaus_recent_payload,
+    write_archive_manifest,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -34,6 +40,56 @@ def test_parse_threatfox_archive_skips_comment_lines_and_reads_iocs() -> None:
     assert parsed.row_count == 2
     assert parsed.indicators[0].indicator_value == "bad.example"
     assert parsed.indicators[0].observation["reporter"] == "unit-test"
+
+
+def test_parse_urlhaus_recent_payload_reads_recent_urls() -> None:
+    parsed = parse_urlhaus_recent_payload(
+        {
+            "query_status": "ok",
+            "urls": [
+                {
+                    "id": 3791294,
+                    "url": "http://110.37.118.241:46513/i",
+                    "url_status": "online",
+                    "host": "110.37.118.241",
+                    "threat": "malware_download",
+                    "payloads": [{"response_sha256": "ab" * 32, "filename": "dropper.bin"}],
+                }
+            ],
+        }
+    )
+
+    assert parsed.feed_name == "urlhaus_recent"
+    assert parsed.row_count == 1
+    assert any(item.indicator_type == "url" for item in parsed.indicators)
+    assert any(item.indicator_type == "ip" for item in parsed.indicators)
+    assert any(item.indicator_type == "sha256" for item in parsed.indicators)
+
+
+def test_parse_threatfox_recent_payload_reads_iocs() -> None:
+    parsed = parse_threatfox_recent_payload(
+        {
+            "query_status": "ok",
+            "data": [
+                {
+                    "id": "1760828",
+                    "ioc": "thorntrue.draniercismn.in.net",
+                    "threat_type": "payload_delivery",
+                    "ioc_type": "domain",
+                    "confidence_level": "100",
+                    "malware": "js.clearfake",
+                    "malware_printable": "ClearFake",
+                    "reporter": "unit-test",
+                }
+            ],
+        }
+    )
+
+    assert parsed.feed_name == "threatfox_recent"
+    assert parsed.row_count == 1
+    assert parsed.indicators[0].indicator_type == "domain"
+    assert parsed.indicators[0].indicator_value == "thorntrue.draniercismn.in.net"
+    assert parsed.indicators[0].observation["malware_family"] == "js.clearfake"
 
 
 def test_write_archive_manifest_records_sha256_and_row_count(tmp_path: Path) -> None:

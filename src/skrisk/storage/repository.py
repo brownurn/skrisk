@@ -405,7 +405,6 @@ class SkillRepository:
         repo: str,
         source_url: str,
         registry_rank: int | None,
-        scan_interval_hours: int = 72,
     ) -> int:
         async with self._session_factory() as session:
             result = await session.execute(
@@ -421,7 +420,7 @@ class SkillRepository:
                     repo=repo,
                     source_url=source_url,
                     registry_rank=registry_rank,
-                    next_scan_at=datetime.now(UTC) + timedelta(hours=scan_interval_hours),
+                    next_scan_at=datetime.now(UTC),
                 )
                 session.add(row)
             else:
@@ -704,6 +703,27 @@ class SkillRepository:
                     "registry_rank": row.registry_rank,
                 }
                 for row in rows
+            ]
+
+    async def list_registry_entries_for_repo_ids(self, repo_ids: list[int]) -> list[dict]:
+        if not repo_ids:
+            return []
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Skill, SkillRepo)
+                .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+                .where(Skill.repo_id.in_(repo_ids))
+                .order_by(SkillRepo.registry_rank.asc().nulls_last(), Skill.id.asc())
+            )
+            return [
+                {
+                    "publisher": repo.publisher,
+                    "repo": repo.repo,
+                    "skill_slug": skill.skill_slug,
+                    "registry_url": skill.registry_url,
+                }
+                for skill, repo in result.all()
             ]
 
     async def mark_repo_scanned(

@@ -131,7 +131,9 @@ class SkillAnalyzer:
                     )
 
             for match in _URL_RE.finditer(expanded):
-                url = match.group(0).strip()
+                url = _normalize_url_token(match.group(0))
+                if not url:
+                    continue
                 indicators.append(
                     ExtractedIndicator(
                         path=path,
@@ -141,7 +143,10 @@ class SkillAnalyzer:
                         raw_value=url,
                     )
                 )
-                hostname = urlparse(url).hostname
+                try:
+                    hostname = urlparse(url).hostname
+                except ValueError:
+                    continue
                 if hostname:
                     normalized_hostname = hostname.lower()
                     domains.add(normalized_hostname)
@@ -229,6 +234,13 @@ def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
         deduped.append(finding)
 
     return deduped
+
+
+def _normalize_url_token(raw_value: str) -> str:
+    value = raw_value.strip()
+    if "](" in value:
+        value = value.split("](", 1)[0]
+    return value.rstrip("],.;:")
 
 
 def _dedupe_indicators(indicators: list[ExtractedIndicator]) -> list[ExtractedIndicator]:

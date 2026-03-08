@@ -5,11 +5,13 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 ## What It Does
 
 - Collects registry intelligence from `skills.sh`
+- Enumerates the live `skills.sh` directory through its paginated JSON API instead of relying on the partial sitemap
 - Mirrors linked GitHub skill repositories into local checkouts
 - Discovers skills across common agent directories and Claude plugin manifests
 - Snapshots repo and skill observations for repeated 72-hour rescans
 - Runs static analysis for prompt injection, remote execution, exfiltration, obfuscation, and change drift
 - Archives immutable Abuse.ch feed snapshots under `archive_root`
+- Falls back to the live Abuse.ch recent APIs when the full URLhaus or ThreatFox exports are malformed
 - Normalizes URLs, domains, IPs, and hashes into canonical indicators with per-provider observations
 - Queues selective VirusTotal enrichment for the highest-risk indicators only
 - Exposes a FastAPI JSON API and a SvelteKit analyst frontend
@@ -20,6 +22,8 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 . .venv/bin/activate
 skrisk init-db
 skrisk init-dirs
+skrisk seed-registry
+skrisk scan-due --limit-repos 100
 skrisk sync-intel --provider abusech
 skrisk sync-registry
 skrisk enrich-vt --limit 25
@@ -64,9 +68,11 @@ The analyst UI now lives in [`frontend/`](frontend) as a SvelteKit application. 
 
 - [Implementation plan](docs/plans/2026-03-06-skrisk-v1.md)
 - [Kickoff notes and discussion decisions](docs/discussions/2026-03-06-kickoff.md)
+- [skills.sh crawl findings](docs/discussions/2026-03-07-skills-sh-crawl-findings.md)
 - [Threat intel and frontend design](docs/plans/2026-03-06-intel-enrichment-design.md)
 - [Threat intel implementation plan](docs/plans/2026-03-06-intel-enrichment-implementation.md)
 - [Risk and intelligence model](docs/architecture/risk-and-intel-model.md)
+- [skills.sh discovery and crawl model](docs/architecture/skills-sh-discovery-and-crawl.md)
 - [Vendor and enrichment decisions](docs/discussions/2026-03-06-threat-intel-vendors.md)
 
 ## Current Gaps

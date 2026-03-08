@@ -5,5 +5,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+*.db-journal
 *.sqlite
+*.sqlite-journal
 data/

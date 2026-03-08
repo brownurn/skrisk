@@ -5,14 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Callable
 
 from skrisk.collectors.abusech import (
     ParsedFeed,
     download_feed_archive,
+    download_threatfox_recent_payload,
+    download_urlhaus_recent_payload,
     parse_threatfox_archive,
+    parse_threatfox_recent_payload,
     parse_urlhaus_archive,
+    parse_urlhaus_recent_payload,
     write_archive_manifest,
 )
 from skrisk.config import Settings
@@ -23,6 +28,8 @@ Parser = Callable[[Path], ParsedFeed]
 
 URLHAUS_EXPORT_URL = "https://urlhaus-api.abuse.ch/files/exports/full.json.zip"
 THREATFOX_EXPORT_URL = "https://threatfox-api.abuse.ch/files/exports/full.csv.zip"
+URLHAUS_RECENT_URL = "https://urlhaus-api.abuse.ch/v1/urls/recent/limit/1000/"
+THREATFOX_RECENT_URL = "https://threatfox-api.abuse.ch/api/v1/"
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,34 +92,48 @@ class AbuseChSyncService:
         raw_bytes: bytes | None,
     ) -> dict[str, int]:
         fetched_at = datetime.now(UTC)
-        if raw_bytes is None:
-            if not self._settings.abusech_auth_key:
-                raise ValueError("ABUSECH_AUTH_KEY is required to download Abuse.ch feeds")
-            raw_bytes = await download_feed_archive(
-                url=definition.source_url,
-                auth_key=self._settings.abusech_auth_key,
-            )
-
+        archive_artifact_name = definition.artifact_name
+        source_url = definition.source_url
+        content_type = "application/zip"
         destination = self._archive_destination(definition.feed_name, fetched_at)
         provisional_archive_path = destination / definition.artifact_name
-        provisional_archive_path.parent.mkdir(parents=True, exist_ok=True)
-        provisional_archive_path.write_bytes(raw_bytes)
-        parsed = definition.parser(provisional_archive_path)
+        try:
+            if raw_bytes is None:
+                if not self._settings.abusech_auth_key:
+                    raise ValueError("ABUSECH_AUTH_KEY is required to download Abuse.ch feeds")
+                raw_bytes = await download_feed_archive(
+                    url=definition.source_url,
+                    auth_key=self._settings.abusech_auth_key,
+                )
+
+            provisional_archive_path.parent.mkdir(parents=True, exist_ok=True)
+            provisional_archive_path.write_bytes(raw_bytes)
+            parsed = definition.parser(provisional_archive_path)
+        except Exception:
+            (
+                parsed,
+                raw_bytes,
+                archive_artifact_name,
+                source_url,
+                content_type,
+            ) = await self._fallback_recent_feed(definition.feed_name)
+            destination = self._archive_destination(parsed.feed_name, fetched_at)
+
         archive_result = write_archive_manifest(
             provider="abusech",
-            feed_name=definition.feed_name,
+            feed_name=parsed.feed_name,
             fetched_at=fetched_at,
             raw_bytes=raw_bytes,
             row_count=parsed.row_count,
             destination=destination,
-            source_url=definition.source_url,
-            artifact_name=definition.artifact_name,
+            source_url=source_url,
+            artifact_name=archive_artifact_name,
         )
 
         feed_run_id = await self._repository.record_intel_feed_run(
             provider="abusech",
-            feed_name=definition.feed_name,
-            source_url=definition.source_url,
+            feed_name=parsed.feed_name,
+            source_url=source_url,
             auth_mode="query-key",
             parser_version="v1",
             archive_sha256=archive_result.archive_sha256,
@@ -124,7 +145,7 @@ class AbuseChSyncService:
             relative_path=self._relative_archive_path(archive_result.archive_path),
             sha256=archive_result.archive_sha256,
             size_bytes=archive_result.archive_path.stat().st_size,
-            content_type="application/zip",
+            content_type=content_type,
         )
         manifest_bytes = archive_result.manifest_path.read_bytes()
         await self._repository.record_intel_feed_artifact(
@@ -148,7 +169,7 @@ class AbuseChSyncService:
                 indicator_id=indicator_id,
                 feed_run_id=feed_run_id,
                 source_provider=item.observation.get("source_provider", "abusech"),
-                source_feed=item.observation.get("source_feed", definition.feed_name),
+                source_feed=item.observation.get("source_feed", parsed.feed_name),
                 provider_record_id=item.observation.get("provider_record_id"),
                 classification=item.observation.get("classification"),
                 confidence_label=item.observation.get("confidence_label"),
@@ -165,6 +186,35 @@ class AbuseChSyncService:
             "indicators_upserted": indicators_upserted,
             "observations_recorded": observations_recorded,
         }
+
+    async def _fallback_recent_feed(
+        self,
+        feed_name: str,
+    ) -> tuple[ParsedFeed, bytes, str, str, str]:
+        if not self._settings.abusech_auth_key:
+            raise ValueError("ABUSECH_AUTH_KEY is required to download Abuse.ch feeds")
+
+        if feed_name == "urlhaus":
+            payload = await download_urlhaus_recent_payload(auth_key=self._settings.abusech_auth_key)
+            return (
+                parse_urlhaus_recent_payload(payload),
+                json.dumps(payload, sort_keys=True).encode("utf-8"),
+                "recent.json",
+                URLHAUS_RECENT_URL,
+                "application/json",
+            )
+
+        if feed_name == "threatfox":
+            payload = await download_threatfox_recent_payload(auth_key=self._settings.abusech_auth_key)
+            return (
+                parse_threatfox_recent_payload(payload),
+                json.dumps(payload, sort_keys=True).encode("utf-8"),
+                "recent.json",
+                THREATFOX_RECENT_URL,
+                "application/json",
+            )
+
+        raise ValueError(f"No fallback configured for feed {feed_name}")
 
     def _archive_destination(self, feed_name: str, fetched_at: datetime) -> Path:
         timestamp = fetched_at.strftime("%H%M%SZ")
