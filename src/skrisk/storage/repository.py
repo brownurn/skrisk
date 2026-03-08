@@ -805,6 +805,28 @@ class SkillRepository:
                 for row in rows
             ]
 
+    async def list_registry_entries_for_repo_ids(self, repo_ids: list[int]) -> list[dict]:
+        if not repo_ids:
+            return []
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Skill, SkillRepo)
+                .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+                .where(Skill.repo_id.in_(repo_ids))
+                .order_by(SkillRepo.registry_rank.asc().nulls_last(), Skill.id.asc())
+            )
+            return [
+                {
+                    "publisher": repo.publisher,
+                    "repo": repo.repo,
+                    "skill_slug": skill.skill_slug,
+                    "registry_url": skill.registry_url,
+                    "weekly_installs": skill.current_weekly_installs,
+                }
+                for skill, repo in result.all()
+            ]
+
     async def mark_repo_scanned(
         self,
         *,

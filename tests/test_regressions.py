@@ -11,7 +11,7 @@ from skrisk.collectors.github import discover_skills_in_checkout, mirror_repo_sn
 from skrisk.collectors.skills_sh import AuditRow, SkillSitemapEntry
 from skrisk.services.sync import RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
-from skrisk.storage.models import SkillRepoSnapshot, SkillSnapshot
+from skrisk.storage.models import Skill, SkillRepoSnapshot, SkillSnapshot
 from skrisk.storage.repository import SkillRepository
 
 
@@ -85,6 +85,7 @@ async def test_registry_sync_allows_repeated_rescans_of_unchanged_skill(tmp_path
             repo="skills",
             skill_slug="agent-tools",
             url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=600,
         )
     ]
 
@@ -120,6 +121,18 @@ async def test_registry_sync_allows_repeated_rescans_of_unchanged_skill(tmp_path
     assert latest_snapshot is not None
     assert latest_snapshot["indicator_links"]
     assert all(not link["is_new_in_snapshot"] for link in latest_snapshot["indicator_links"])
+    assert detail["current_weekly_installs"] == 600
+
+    async with session_factory() as session:
+        skill_id = await session.scalar(select(Skill.id).where(Skill.skill_slug == "agent-tools"))
+
+    observations = await repository.list_skill_registry_observations(skill_id=skill_id)
+    assert [row["observation_kind"] for row in observations] == [
+        "directory_fetch",
+        "scan_attribution",
+        "directory_fetch",
+        "scan_attribution",
+    ]
 
 
 @pytest.mark.asyncio
@@ -137,18 +150,21 @@ async def test_registry_sync_creates_one_repo_snapshot_per_repo_and_isolates_fai
             repo="skills",
             skill_slug="good-skill",
             url="https://skills.sh/tul-sh/skills/good-skill",
+            weekly_installs=12,
         ),
         SkillSitemapEntry(
             publisher="tul-sh",
             repo="skills",
             skill_slug="broken-skill",
             url="https://skills.sh/tul-sh/skills/broken-skill",
+            weekly_installs=7,
         ),
         SkillSitemapEntry(
             publisher="tul-sh",
             repo="skills",
             skill_slug="second-good-skill",
             url="https://skills.sh/tul-sh/skills/second-good-skill",
+            weekly_installs=5,
         ),
     ]
 

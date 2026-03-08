@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 
 from skrisk.analysis.analyzer import SkillAnalyzer
 from skrisk.collectors.github import load_skill_files
 from skrisk.collectors.skills_sh import AuditRow, PartnerVerdict, SkillSitemapEntry
 from skrisk.services.sync import RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
+from skrisk.storage.models import RegistrySyncRun, Skill
 from skrisk.storage.repository import SkillRepository
 
 
@@ -47,6 +49,7 @@ async def test_registry_sync_service_persists_repo_skill_snapshot_and_verdicts(
             repo="skills",
             skill_slug="agent-tools",
             url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=1200,
         )
     ]
     audit_rows = [
@@ -109,3 +112,84 @@ async def test_registry_sync_service_persists_repo_skill_snapshot_and_verdicts(
     assert detail["latest_snapshot"]["folder_hash"]
     assert detail["external_verdicts"][0]["partner"] == "agent_trust_hub"
     assert detail["latest_snapshot"]["risk_report"]["severity"] == "critical"
+    assert detail["current_weekly_installs"] == 1200
+
+    async with session_factory() as session:
+        run_count = await session.scalar(select(func.count()).select_from(RegistrySyncRun))
+        skill_id = await session.scalar(select(Skill.id).where(Skill.skill_slug == "agent-tools"))
+
+    observations = await repository.list_skill_registry_observations(skill_id=skill_id)
+
+    assert run_count == 1
+    assert [row["observation_kind"] for row in observations] == [
+        "directory_fetch",
+        "scan_attribution",
+    ]
+    assert observations[0]["weekly_installs"] == 1200
+    assert observations[1]["repo_snapshot_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_service_can_seed_registry_without_repo_analysis(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'seed.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    service = RegistrySyncService(
+        session_factory=session_factory,
+        analyzer=SkillAnalyzer(),
+    )
+
+    entries = [
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=75,
+        ),
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="second-skill",
+            url="https://skills.sh/tul-sh/skills/second-skill",
+            weekly_installs=20,
+        ),
+    ]
+
+    summary = await service.seed_registry_snapshot(
+        sitemap_entries=entries,
+        audit_rows=[],
+    )
+
+    repository = SkillRepository(session_factory)
+    stats = await repository.get_dashboard_stats()
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
+
+    async with session_factory() as session:
+        run_count = await session.scalar(select(func.count()).select_from(RegistrySyncRun))
+        skill_rows = (
+            await session.execute(select(Skill).where(Skill.repo_id == 1).order_by(Skill.skill_slug.asc()))
+        ).scalars().all()
+
+    assert summary["repos_seeded"] == 1
+    assert summary["skills_seeded"] == 2
+    assert stats["tracked_repos"] == 1
+    assert stats["tracked_skills"] == 2
+    assert detail is not None
+    assert detail["latest_snapshot"] is None
+    assert detail["current_weekly_installs"] == 75
+    assert run_count == 1
+    assert len(skill_rows) == 2
+
+    observations = [
+        await repository.list_skill_registry_observations(skill_id=skill_row.id)
+        for skill_row in skill_rows
+    ]
+    assert all(rows and rows[0]["observation_kind"] == "directory_fetch" for rows in observations)

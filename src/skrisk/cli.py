@@ -9,11 +9,13 @@ import uvicorn
 
 from skrisk.api import create_app
 from skrisk.config import load_settings
+from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.scheduler import next_scan_time
 from skrisk.services.intel_sync import AbuseChSyncService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySyncService, SkillsShClient
 from skrisk.services.vt_triage import VTTriageService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
+from skrisk.storage.repository import SkillRepository
 
 
 @click.group()
@@ -69,6 +71,86 @@ def sync_registry_command() -> None:
         )
         click.echo(
             f"Synchronized {summary['skills_seen']} skills across {summary['repos_seen']} repos"
+        )
+
+    from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("seed-registry")
+def seed_registry_command() -> None:
+    """Fetch the public registry and seed repo/skill metadata without deep repo analysis."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        snapshot = await SkillsShClient(settings.skills_sh_base_url).fetch_snapshot()
+        summary = await RegistrySyncService(
+            session_factory=session_factory,
+            analyzer=SkillAnalyzer(),
+        ).seed_registry_snapshot(
+            sitemap_entries=snapshot.sitemap_entries,
+            audit_rows=snapshot.audit_rows,
+        )
+        click.echo(
+            "Seeded "
+            f"{summary['skills_seeded']} skills across {summary['repos_seeded']} repos "
+            f"from {snapshot.total_skills or len(snapshot.sitemap_entries)} reported rows"
+        )
+
+    from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("scan-due")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+def scan_due_command(limit_repos: int) -> None:
+    """Scan a bounded set of repos that are due for analysis."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.mirror_root.mkdir(parents=True, exist_ok=True)
+
+        repository = SkillRepository(session_factory)
+        due_repos = await repository.list_due_repos()
+        due_repos = sorted(due_repos, key=_repo_sort_key)[:limit_repos]
+        if not due_repos:
+            click.echo("No due repos")
+            return
+
+        tracked_entries = await repository.list_registry_entries_for_repo_ids(
+            [row["id"] for row in due_repos]
+        )
+        filtered_entries = [
+            SkillSitemapEntry(
+                publisher=row["publisher"],
+                repo=row["repo"],
+                skill_slug=row["skill_slug"],
+                url=row["registry_url"],
+                weekly_installs=row["weekly_installs"],
+            )
+            for row in tracked_entries
+        ]
+        loader = GitHubSkillLoader(settings.mirror_root)
+        summary = await RegistrySyncService(
+            session_factory=session_factory,
+            analyzer=SkillAnalyzer(),
+        ).ingest_registry_snapshot(
+            sitemap_entries=filtered_entries,
+            audit_rows=[],
+            skill_loader=loader,
+            record_directory_fetch=False,
+        )
+        click.echo(
+            f"Scanned {summary['skills_seen']} skills across {summary['repos_seen']} repos "
+            f"from {len(due_repos)} due repos"
         )
 
     from skrisk.analysis.analyzer import SkillAnalyzer
@@ -170,3 +252,13 @@ def collect_once() -> None:
     from skrisk.analysis.analyzer import SkillAnalyzer
 
     asyncio.run(_run())
+
+
+def _repo_sort_key(row: dict) -> tuple[int, int, str, str]:
+    rank = row.get("registry_rank")
+    return (
+        1 if rank is None else 0,
+        rank or 0,
+        row["publisher"],
+        row["repo"],
+    )
