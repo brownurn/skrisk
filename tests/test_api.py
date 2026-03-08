@@ -298,12 +298,20 @@ async def test_api_skills_support_install_filters_and_sorting(tmp_path) -> None:
         transport=ASGITransport(app=app),
         base_url="http://testserver",
     ) as client:
+        default_response = await client.get("/api/skills?limit=0")
         installs_response = await client.get(
             "/api/skills?limit=0&min_weekly_installs=1500&max_weekly_installs=9000&sort=installs"
         )
         priority_response = await client.get("/api/skills?limit=0&sort=priority")
         risk_response = await client.get("/api/skills?limit=0&sort=risk")
         growth_response = await client.get("/api/skills?limit=0&sort=growth")
+
+    assert default_response.status_code == 200
+    assert [item["skill_slug"] for item in default_response.json()] == [
+        "risky-riser",
+        "shrinking-critical",
+        "popular-safe",
+    ]
 
     assert installs_response.status_code == 200
     assert [item["skill_slug"] for item in installs_response.json()] == [

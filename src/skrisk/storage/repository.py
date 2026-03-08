@@ -1020,7 +1020,7 @@ class SkillRepository:
 
 
 def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None:
-    if sort == "priority":
+    if sort in {None, "priority"}:
         rows.sort(
             key=lambda item: (
                 item["priority_score"],
@@ -1061,9 +1061,6 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             reverse=True,
         )
         return
-
-    rows.sort(key=lambda item: item["latest_snapshot"]["id"], reverse=True)
-
 
 def _build_install_telemetry(
     *,
