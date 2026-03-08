@@ -11,7 +11,7 @@ from skrisk.collectors.github import load_skill_files
 from skrisk.collectors.skills_sh import AuditRow, PartnerVerdict, SkillSitemapEntry
 from skrisk.services.sync import RegistrySyncService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
-from skrisk.storage.models import RegistrySyncRun, Skill
+from skrisk.storage.models import RegistrySyncRun, Skill, SkillRepo
 from skrisk.storage.repository import SkillRepository
 
 
@@ -315,3 +315,130 @@ async def test_registry_sync_service_uses_cached_install_observation_metadata_fo
     assert observations[1]["observed_at"] == cached_observed_at.isoformat()
     assert observations[1]["registry_sync_run_id"] == observations[0]["registry_sync_run_id"] == 1
     assert observations[1]["registry_rank"] == 7
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_service_preserves_none_rank_for_unranked_skill_scan_attribution(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'mixed-rank.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    service = RegistrySyncService(
+        session_factory=session_factory,
+        analyzer=SkillAnalyzer(),
+    )
+    cached_observed_at = datetime(2026, 3, 7, 9, 15, tzinfo=UTC)
+
+    sitemap_entries = [
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=600,
+        ),
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="second-skill",
+            url="https://skills.sh/tul-sh/skills/second-skill",
+            weekly_installs=450,
+        ),
+    ]
+    audit_rows = [
+        AuditRow(
+            rank=5,
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            name="agent-tools",
+            partners={},
+        )
+    ]
+
+    async def loader(entry: SkillSitemapEntry) -> tuple[str, dict[str, str]]:
+        return (
+            "abc123",
+            {
+                "SKILL.md": (
+                    f"---\nname: {entry.skill_slug}\ndescription: helper\n---\n"
+                ),
+            },
+        )
+
+    await service.seed_registry_snapshot(
+        sitemap_entries=sitemap_entries,
+        audit_rows=audit_rows,
+        total_skills_reported=600,
+        pages_fetched=3,
+        observed_at=cached_observed_at,
+    )
+
+    repository = SkillRepository(session_factory)
+
+    async with session_factory() as session:
+        repo_id = await session.scalar(
+            select(SkillRepo.id).where(
+                SkillRepo.publisher == "tul-sh",
+                SkillRepo.repo == "skills",
+            )
+        )
+        unranked_skill_id = await session.scalar(
+            select(Skill.id).where(Skill.skill_slug == "second-skill")
+        )
+
+    assert repo_id is not None
+    assert unranked_skill_id is not None
+
+    tracked_entries = await repository.list_registry_entries_for_repo_ids([repo_id])
+    assert tracked_entries == [
+        {
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "skill_slug": "agent-tools",
+            "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
+            "weekly_installs": 600,
+            "weekly_installs_observed_at": cached_observed_at,
+            "registry_rank": 5,
+            "registry_sync_run_id": 1,
+        },
+        {
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "skill_slug": "second-skill",
+            "registry_url": "https://skills.sh/tul-sh/skills/second-skill",
+            "weekly_installs": 450,
+            "weekly_installs_observed_at": cached_observed_at,
+            "registry_rank": None,
+            "registry_sync_run_id": 1,
+        },
+    ]
+
+    cached_context_by_skill = {
+        (entry["publisher"], entry["repo"], entry["skill_slug"]): {
+            "observed_at": entry["weekly_installs_observed_at"],
+            "registry_rank": entry["registry_rank"],
+            "registry_sync_run_id": entry["registry_sync_run_id"],
+        }
+        for entry in tracked_entries
+    }
+
+    await service.ingest_registry_snapshot(
+        sitemap_entries=sitemap_entries,
+        audit_rows=[],
+        skill_loader=loader,
+        record_directory_fetch=False,
+        registry_observation_context_by_skill=cached_context_by_skill,
+    )
+
+    observations = await repository.list_skill_registry_observations(skill_id=unranked_skill_id)
+
+    assert [row["observation_kind"] for row in observations] == [
+        "directory_fetch",
+        "scan_attribution",
+    ]
+    assert observations[1]["observed_at"] == cached_observed_at.isoformat()
+    assert observations[1]["registry_sync_run_id"] == observations[0]["registry_sync_run_id"] == 1
+    assert observations[1]["registry_rank"] is None
