@@ -57,6 +57,9 @@ class SkillRepoSnapshot(Base):
 
     repo_ref: Mapped[SkillRepo] = relationship(back_populates="snapshots")
     skill_snapshots: Mapped[list["SkillSnapshot"]] = relationship(back_populates="repo_snapshot")
+    registry_observations: Mapped[list["SkillRegistryObservation"]] = relationship(
+        back_populates="repo_snapshot"
+    )
 
 
 class Skill(Base):
@@ -70,6 +73,14 @@ class Skill(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     registry_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    current_weekly_installs: Mapped[int | None] = mapped_column(Integer)
+    current_weekly_installs_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    current_registry_rank: Mapped[int | None] = mapped_column(Integer)
+    current_registry_sync_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("registry_sync_runs.id")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -80,6 +91,13 @@ class Skill(Base):
     repo_ref: Mapped[SkillRepo] = relationship(back_populates="skills")
     snapshots: Mapped[list["SkillSnapshot"]] = relationship(back_populates="skill")
     external_verdicts: Mapped[list["ExternalVerdict"]] = relationship(back_populates="skill")
+    current_registry_sync_run: Mapped["RegistrySyncRun | None"] = relationship(
+        back_populates="current_skills",
+        foreign_keys=[current_registry_sync_run_id],
+    )
+    registry_observations: Mapped[list["SkillRegistryObservation"]] = relationship(
+        back_populates="skill"
+    )
 
     __table_args__ = (UniqueConstraint("repo_id", "skill_slug", name="uq_repo_skill"),)
 
@@ -123,6 +141,52 @@ class ExternalVerdict(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     skill: Mapped[Skill] = relationship(back_populates="external_verdicts")
+
+
+class RegistrySyncRun(Base):
+    """Directory crawl metadata for install telemetry observations."""
+
+    __tablename__ = "registry_sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+    view: Mapped[str] = mapped_column(String(255), nullable=False)
+    total_skills_reported: Mapped[int | None] = mapped_column(Integer)
+    pages_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success: Mapped[bool] = mapped_column(nullable=False, default=True)
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    observations: Mapped[list["SkillRegistryObservation"]] = relationship(
+        back_populates="registry_sync_run"
+    )
+    current_skills: Mapped[list["Skill"]] = relationship(
+        back_populates="current_registry_sync_run",
+        foreign_keys="Skill.current_registry_sync_run_id",
+    )
+
+
+class SkillRegistryObservation(Base):
+    """Historical install telemetry observations for a skill."""
+
+    __tablename__ = "skill_registry_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id"), nullable=False)
+    registry_sync_run_id: Mapped[int | None] = mapped_column(ForeignKey("registry_sync_runs.id"))
+    repo_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("skill_repo_snapshots.id"))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    weekly_installs: Mapped[int] = mapped_column(Integer, nullable=False)
+    registry_rank: Mapped[int | None] = mapped_column(Integer)
+    observation_kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    skill: Mapped[Skill] = relationship(back_populates="registry_observations")
+    registry_sync_run: Mapped[RegistrySyncRun | None] = relationship(back_populates="observations")
+    repo_snapshot: Mapped[SkillRepoSnapshot | None] = relationship(
+        back_populates="registry_observations"
+    )
 
 
 class IntelFeedRun(Base):

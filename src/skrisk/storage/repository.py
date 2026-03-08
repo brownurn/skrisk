@@ -16,8 +16,10 @@ from skrisk.storage.models import (
     IndicatorObservation,
     IntelFeedArtifact,
     IntelFeedRun,
+    RegistrySyncRun,
     Skill,
     SkillIndicatorLink,
+    SkillRegistryObservation,
     SkillRepo,
     SkillRepoSnapshot,
     SkillSnapshot,
@@ -56,6 +58,93 @@ class SkillRepository:
             await session.commit()
             await session.refresh(row)
             return row.id
+
+    async def record_registry_sync_run(
+        self,
+        *,
+        source: str,
+        view: str,
+        total_skills_reported: int | None,
+        pages_fetched: int,
+        success: bool,
+        error_summary: str | None = None,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = RegistrySyncRun(
+                source=source,
+                view=view,
+                total_skills_reported=total_skills_reported,
+                pages_fetched=pages_fetched,
+                success=success,
+                error_summary=error_summary,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def record_skill_registry_observation(
+        self,
+        *,
+        skill_id: int,
+        registry_sync_run_id: int | None,
+        repo_snapshot_id: int | None,
+        observed_at: datetime,
+        weekly_installs: int,
+        registry_rank: int | None,
+        observation_kind: str,
+        raw_payload: dict[str, Any] | None,
+    ) -> int:
+        async with self._session_factory() as session:
+            row = SkillRegistryObservation(
+                skill_id=skill_id,
+                registry_sync_run_id=registry_sync_run_id,
+                repo_snapshot_id=repo_snapshot_id,
+                observed_at=observed_at,
+                weekly_installs=weekly_installs,
+                registry_rank=registry_rank,
+                observation_kind=observation_kind,
+                raw_payload=raw_payload,
+            )
+            session.add(row)
+
+            if observation_kind == "directory_fetch":
+                skill = await session.get(Skill, skill_id)
+                if skill is not None:
+                    skill.current_weekly_installs = weekly_installs
+                    skill.current_weekly_installs_observed_at = observed_at
+                    skill.current_registry_rank = registry_rank
+                    skill.current_registry_sync_run_id = registry_sync_run_id
+
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def list_skill_registry_observations(self, *, skill_id: int) -> list[dict]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(SkillRegistryObservation)
+                .where(SkillRegistryObservation.skill_id == skill_id)
+                .order_by(
+                    SkillRegistryObservation.observed_at.asc(),
+                    SkillRegistryObservation.id.asc(),
+                )
+            )
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "skill_id": row.skill_id,
+                    "registry_sync_run_id": row.registry_sync_run_id,
+                    "repo_snapshot_id": row.repo_snapshot_id,
+                    "observed_at": _isoformat_datetime(row.observed_at),
+                    "weekly_installs": row.weekly_installs,
+                    "registry_rank": row.registry_rank,
+                    "observation_kind": row.observation_kind,
+                    "raw_payload": row.raw_payload,
+                }
+                for row in rows
+            ]
 
     async def record_intel_feed_artifact(
         self,
@@ -783,6 +872,11 @@ class SkillRepository:
                 "title": skill_row.title,
                 "relative_path": skill_row.relative_path,
                 "registry_url": skill_row.registry_url,
+                "current_weekly_installs": skill_row.current_weekly_installs,
+                "current_weekly_installs_observed_at": _isoformat_datetime(
+                    skill_row.current_weekly_installs_observed_at
+                ),
+                "current_registry_rank": skill_row.current_registry_rank,
                 "latest_snapshot": (
                     {
                         "id": latest_snapshot.id,
@@ -813,3 +907,11 @@ def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str
     if indicator_type in {"domain", "hostname", "ip", "sha256"}:
         return value.lower()
     return value
+
+
+def _isoformat_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.isoformat()
