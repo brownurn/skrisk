@@ -176,7 +176,7 @@ class SkillRegistryObservation(Base):
     registry_sync_run_id: Mapped[int | None] = mapped_column(ForeignKey("registry_sync_runs.id"))
     repo_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("skill_repo_snapshots.id"))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    weekly_installs: Mapped[int] = mapped_column(Integer, nullable=False)
+    weekly_installs: Mapped[int | None] = mapped_column(Integer)
     registry_rank: Mapped[int | None] = mapped_column(Integer)
     observation_kind: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)

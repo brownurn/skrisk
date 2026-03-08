@@ -90,11 +90,16 @@ class SkillRepository:
         registry_sync_run_id: int | None,
         repo_snapshot_id: int | None,
         observed_at: datetime,
-        weekly_installs: int,
+        weekly_installs: int | None,
         registry_rank: int | None,
         observation_kind: str,
         raw_payload: dict[str, Any] | None,
     ) -> int:
+        _validate_registry_observation_provenance(
+            observation_kind=observation_kind,
+            registry_sync_run_id=registry_sync_run_id,
+            repo_snapshot_id=repo_snapshot_id,
+        )
         async with self._session_factory() as session:
             row = SkillRegistryObservation(
                 skill_id=skill_id,
@@ -929,3 +934,22 @@ def _coerce_datetime_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _validate_registry_observation_provenance(
+    *,
+    observation_kind: str,
+    registry_sync_run_id: int | None,
+    repo_snapshot_id: int | None,
+) -> None:
+    if observation_kind == "directory_fetch":
+        if registry_sync_run_id is None:
+            raise ValueError("directory_fetch requires registry_sync_run_id")
+        return
+
+    if observation_kind == "scan_attribution":
+        if repo_snapshot_id is None:
+            raise ValueError("scan_attribution requires repo_snapshot_id")
+        return
+
+    raise ValueError(f"Invalid observation_kind: {observation_kind}")
