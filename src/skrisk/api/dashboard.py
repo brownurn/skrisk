@@ -20,7 +20,7 @@ async def dashboard_overview(request: Request) -> HTMLResponse:
     await ensure_initialized(request.app.state.session_factory)
     repository = SkillRepository(request.app.state.session_factory)
     stats = await repository.get_dashboard_stats()
-    top_skills = await repository.list_skills(limit=10, severity="critical")
+    top_skills = await repository.list_skills(limit=10, severity="critical", sort="priority")
     return templates.TemplateResponse(
         request,
         "dashboard.html",

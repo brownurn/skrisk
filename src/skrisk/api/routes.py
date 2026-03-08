@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,9 +24,21 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> APIRouter
         return await repository.get_dashboard_stats()
 
     @router.get("/api/skills")
-    async def list_skills(limit: int = 50, severity: str | None = None) -> list[dict]:
+    async def list_skills(
+        limit: int = 50,
+        severity: str | None = None,
+        min_weekly_installs: int | None = None,
+        max_weekly_installs: int | None = None,
+        sort: Literal["priority", "risk", "installs", "growth"] | None = None,
+    ) -> list[dict]:
         await ensure_initialized(session_factory)
-        return await repository.list_skills(limit=limit, severity=severity)
+        return await repository.list_skills(
+            limit=limit,
+            severity=severity,
+            min_weekly_installs=min_weekly_installs,
+            max_weekly_installs=max_weekly_installs,
+            sort=sort,
+        )
 
     @router.get("/api/skills/{publisher}/{repo}/{skill_slug}")
     async def skill_detail(publisher: str, repo: str, skill_slug: str) -> dict:

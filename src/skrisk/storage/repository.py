@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -9,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from skrisk.analysis import compute_priority_metrics
 from skrisk.storage.models import (
     ExternalVerdict,
     Indicator,
@@ -669,34 +671,66 @@ class SkillRepository:
         *,
         limit: int = 50,
         severity: str | None = None,
+        min_weekly_installs: int | None = None,
+        max_weekly_installs: int | None = None,
+        sort: str | None = None,
     ) -> list[dict]:
         async with self._session_factory() as session:
             rows = await self._load_latest_skill_rows(session)
-            if severity is not None:
-                rows = [
-                    row
-                    for row in rows
-                    if (row[2].risk_report or {}).get("severity") == severity
-                ]
+            observations_by_skill = await self._load_registry_observations(
+                session,
+                [skill_row.id for skill_row, _, _ in rows],
+            )
+            enriched_rows = []
+            for skill_row, repo_row, snapshot_row in rows:
+                risk_report = snapshot_row.risk_report or {}
+                if severity is not None and risk_report.get("severity") != severity:
+                    continue
+                if min_weekly_installs is not None and (
+                    skill_row.current_weekly_installs is None
+                    or skill_row.current_weekly_installs < min_weekly_installs
+                ):
+                    continue
+                if max_weekly_installs is not None and (
+                    skill_row.current_weekly_installs is None
+                    or skill_row.current_weekly_installs > max_weekly_installs
+                ):
+                    continue
+
+                telemetry = _build_install_telemetry(
+                    skill_row=skill_row,
+                    snapshot_row=snapshot_row,
+                    observations=observations_by_skill.get(skill_row.id, []),
+                )
+                enriched_rows.append(
+                    {
+                        "publisher": repo_row.publisher,
+                        "repo": repo_row.repo,
+                        "skill_slug": skill_row.skill_slug,
+                        "title": skill_row.title,
+                        "current_weekly_installs": telemetry["current_weekly_installs"],
+                        "current_weekly_installs_observed_at": telemetry[
+                            "current_weekly_installs_observed_at"
+                        ],
+                        "peak_weekly_installs": telemetry["peak_weekly_installs"],
+                        "weekly_installs_delta": telemetry["weekly_installs_delta"],
+                        "impact_score": telemetry["impact_score"],
+                        "priority_score": telemetry["priority_score"],
+                        "latest_snapshot": {
+                            "id": snapshot_row.id,
+                            "version_label": snapshot_row.version_label,
+                            "folder_hash": snapshot_row.folder_hash,
+                            "referenced_files": snapshot_row.referenced_files,
+                            "extracted_domains": snapshot_row.extracted_domains,
+                            "risk_report": snapshot_row.risk_report,
+                        },
+                    }
+                )
+
+            _sort_skill_listing(enriched_rows, sort=sort)
             if limit > 0:
-                rows = rows[:limit]
-            return [
-                {
-                    "publisher": repo_row.publisher,
-                    "repo": repo_row.repo,
-                    "skill_slug": skill_row.skill_slug,
-                    "title": skill_row.title,
-                    "latest_snapshot": {
-                        "id": snapshot_row.id,
-                        "version_label": snapshot_row.version_label,
-                        "folder_hash": snapshot_row.folder_hash,
-                        "referenced_files": snapshot_row.referenced_files,
-                        "extracted_domains": snapshot_row.extracted_domains,
-                        "risk_report": snapshot_row.risk_report,
-                    },
-                }
-                for skill_row, repo_row, snapshot_row in rows
-            ]
+                enriched_rows = enriched_rows[:limit]
+            return enriched_rows
 
     async def list_intel_feed_runs(self, *, limit: int = 20) -> list[dict]:
         async with self._session_factory() as session:
@@ -784,6 +818,28 @@ class SkillRepository:
             .order_by(SkillSnapshot.id.desc())
         )
         return list(result.all())
+
+    async def _load_registry_observations(
+        self,
+        session: AsyncSession,
+        skill_ids: list[int],
+    ) -> dict[int, list[SkillRegistryObservation]]:
+        if not skill_ids:
+            return {}
+
+        result = await session.execute(
+            select(SkillRegistryObservation)
+            .where(SkillRegistryObservation.skill_id.in_(skill_ids))
+            .order_by(
+                SkillRegistryObservation.skill_id.asc(),
+                SkillRegistryObservation.observed_at.asc(),
+                SkillRegistryObservation.id.asc(),
+            )
+        )
+        observations_by_skill: dict[int, list[SkillRegistryObservation]] = defaultdict(list)
+        for row in result.scalars().all():
+            observations_by_skill[row.skill_id].append(row)
+        return dict(observations_by_skill)
 
     async def list_due_repos(self, *, now: datetime | None = None) -> list[dict]:
         now = now or datetime.now(UTC)
@@ -885,6 +941,13 @@ class SkillRepository:
                 .limit(1)
             )
             latest_snapshot = snapshot_result.scalar_one_or_none()
+            observations_by_skill = await self._load_registry_observations(session, [skill_row.id])
+            observations = observations_by_skill.get(skill_row.id, [])
+            telemetry = _build_install_telemetry(
+                skill_row=skill_row,
+                snapshot_row=latest_snapshot,
+                observations=observations,
+            )
 
             verdict_result = await session.execute(
                 select(ExternalVerdict)
@@ -921,11 +984,16 @@ class SkillRepository:
                 "title": skill_row.title,
                 "relative_path": skill_row.relative_path,
                 "registry_url": skill_row.registry_url,
-                "current_weekly_installs": skill_row.current_weekly_installs,
-                "current_weekly_installs_observed_at": _isoformat_datetime(
-                    skill_row.current_weekly_installs_observed_at
-                ),
+                "current_weekly_installs": telemetry["current_weekly_installs"],
+                "current_weekly_installs_observed_at": telemetry[
+                    "current_weekly_installs_observed_at"
+                ],
                 "current_registry_rank": skill_row.current_registry_rank,
+                "peak_weekly_installs": telemetry["peak_weekly_installs"],
+                "weekly_installs_delta": telemetry["weekly_installs_delta"],
+                "impact_score": telemetry["impact_score"],
+                "priority_score": telemetry["priority_score"],
+                "install_history": _serialize_install_history(observations),
                 "latest_snapshot": (
                     {
                         "id": latest_snapshot.id,
@@ -949,6 +1017,128 @@ class SkillRepository:
                     for verdict in verdicts
                 ],
             }
+
+
+def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None:
+    if sort == "priority":
+        rows.sort(
+            key=lambda item: (
+                item["priority_score"],
+                item["latest_snapshot"]["risk_report"].get("score", 0),
+                item["current_weekly_installs"] or -1,
+                item["latest_snapshot"]["id"],
+            ),
+            reverse=True,
+        )
+        return
+    if sort == "risk":
+        rows.sort(
+            key=lambda item: (
+                item["latest_snapshot"]["risk_report"].get("score", 0),
+                item["priority_score"],
+                item["latest_snapshot"]["id"],
+            ),
+            reverse=True,
+        )
+        return
+    if sort == "installs":
+        rows.sort(
+            key=lambda item: (
+                item["current_weekly_installs"] or -1,
+                item["priority_score"],
+                item["latest_snapshot"]["id"],
+            ),
+            reverse=True,
+        )
+        return
+    if sort == "growth":
+        rows.sort(
+            key=lambda item: (
+                item["weekly_installs_delta"] if item["weekly_installs_delta"] is not None else -10**9,
+                item["current_weekly_installs"] or -1,
+                item["latest_snapshot"]["id"],
+            ),
+            reverse=True,
+        )
+        return
+
+    rows.sort(key=lambda item: item["latest_snapshot"]["id"], reverse=True)
+
+
+def _build_install_telemetry(
+    *,
+    skill_row: Skill,
+    snapshot_row: SkillSnapshot | None,
+    observations: list[SkillRegistryObservation],
+) -> dict[str, Any]:
+    metric_observations = _select_metric_observations(observations)
+    previous_weekly_installs = _previous_weekly_installs(metric_observations)
+    peak_weekly_installs = _peak_weekly_installs(metric_observations)
+    risk_report = snapshot_row.risk_report if snapshot_row is not None else {}
+    metrics = compute_priority_metrics(
+        risk_score=int((risk_report or {}).get("score") or 0),
+        severity=str((risk_report or {}).get("severity") or "none"),
+        confidence=(risk_report or {}).get("confidence"),
+        current_weekly_installs=skill_row.current_weekly_installs,
+        previous_weekly_installs=previous_weekly_installs,
+        peak_weekly_installs=peak_weekly_installs,
+    )
+    return {
+        "current_weekly_installs": skill_row.current_weekly_installs,
+        "current_weekly_installs_observed_at": _isoformat_datetime(
+            skill_row.current_weekly_installs_observed_at
+        ),
+        "peak_weekly_installs": metrics.peak_weekly_installs,
+        "weekly_installs_delta": metrics.install_delta,
+        "impact_score": metrics.impact_score,
+        "priority_score": metrics.priority_score,
+    }
+
+
+def _select_metric_observations(
+    observations: list[SkillRegistryObservation],
+) -> list[SkillRegistryObservation]:
+    directory_fetches = [
+        row for row in observations if row.observation_kind == "directory_fetch"
+    ]
+    return directory_fetches or observations
+
+
+def _previous_weekly_installs(
+    observations: list[SkillRegistryObservation],
+) -> int | None:
+    for row in reversed(observations[:-1]):
+        if row.weekly_installs is not None:
+            return row.weekly_installs
+    return None
+
+
+def _peak_weekly_installs(
+    observations: list[SkillRegistryObservation],
+) -> int | None:
+    known_installs = [row.weekly_installs for row in observations if row.weekly_installs is not None]
+    if not known_installs:
+        return None
+    return max(known_installs)
+
+
+def _serialize_install_history(
+    observations: list[SkillRegistryObservation],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": row.id,
+            "skill_id": row.skill_id,
+            "registry_sync_run_id": row.registry_sync_run_id,
+            "repo_snapshot_id": row.repo_snapshot_id,
+            "observed_at": _isoformat_datetime(row.observed_at),
+            "weekly_installs": row.weekly_installs,
+            "registry_rank": row.registry_rank,
+            "observation_kind": row.observation_kind,
+            "raw_payload": row.raw_payload,
+        }
+        for row in _select_metric_observations(observations)
+    ]
 
 
 def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str:
