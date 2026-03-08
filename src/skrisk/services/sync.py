@@ -30,11 +30,24 @@ from skrisk.storage.repository import SkillRepository
 SkillLoader = Callable[[SkillSitemapEntry], Awaitable[tuple[str, dict[str, str]]]]
 
 
+class _RegistryEntryBatch(list[SkillSitemapEntry]):
+    def __init__(
+        self,
+        *,
+        total_skills_reported: int | None = None,
+        pages_fetched: int = 0,
+    ) -> None:
+        super().__init__()
+        self.total_skills_reported = total_skills_reported
+        self.pages_fetched = pages_fetched
+
+
 @dataclass(slots=True, frozen=True)
 class RegistrySnapshot:
     sitemap_entries: list[SkillSitemapEntry]
     audit_rows: list[AuditRow]
     total_skills: int | None = None
+    pages_fetched: int = 0
 
 
 class SkillsShClient:
@@ -54,10 +67,11 @@ class SkillsShClient:
 
         audits_response = await client.get(f"{self._base_url}/audits")
         audits_response.raise_for_status()
-        entries: list[SkillSitemapEntry] = []
+        entries = _RegistryEntryBatch()
         seen: set[tuple[str, str, str]] = set()
         page = 0
-        total_skills = 0
+        page_count = 0
+        total_skills: int | None = None
 
         while True:
             directory_response = await self._get_with_retry(
@@ -66,6 +80,7 @@ class SkillsShClient:
             )
             directory_page = parse_directory_page(directory_response.json(), base_url=self._base_url)
             total_skills = directory_page.total
+            page_count += 1
 
             for entry in directory_page.entries:
                 key = (entry.publisher, entry.repo, entry.skill_slug)
@@ -78,10 +93,14 @@ class SkillsShClient:
                 break
             page += 1
 
+        entries.total_skills_reported = total_skills
+        entries.pages_fetched = page_count
+
         return RegistrySnapshot(
             sitemap_entries=entries,
             audit_rows=extract_audit_rows(audits_response.text),
             total_skills=total_skills,
+            pages_fetched=page_count,
         )
 
     async def _get_with_retry(
@@ -148,11 +167,17 @@ class RegistrySyncService:
         *,
         sitemap_entries: list[SkillSitemapEntry],
         audit_rows: list[AuditRow],
+        total_skills_reported: int | None = None,
+        pages_fetched: int | None = None,
+        observed_at: datetime | None = None,
     ) -> dict[str, int]:
         _, _, seen_repos, _, unique_skill_keys = await self._seed_registry_metadata(
             sitemap_entries=sitemap_entries,
             audit_rows=audit_rows,
             record_directory_fetch=True,
+            total_skills_reported=total_skills_reported,
+            pages_fetched=pages_fetched,
+            observed_at=observed_at,
         )
         return {
             "repos_seeded": len(seen_repos),
@@ -166,11 +191,22 @@ class RegistrySyncService:
         audit_rows: list[AuditRow],
         skill_loader: SkillLoader,
         record_directory_fetch: bool = True,
+        total_skills_reported: int | None = None,
+        pages_fetched: int | None = None,
+        observed_at: datetime | None = None,
+        registry_observation_context_by_skill: dict[
+            tuple[str, str, str],
+            dict[str, object],
+        ]
+        | None = None,
     ) -> dict[str, int]:
         audit_map, repo_groups, seen_repos, repo_ids_by_key, _ = await self._seed_registry_metadata(
             sitemap_entries=sitemap_entries,
             audit_rows=audit_rows,
             record_directory_fetch=record_directory_fetch,
+            total_skills_reported=total_skills_reported,
+            pages_fetched=pages_fetched,
+            observed_at=observed_at,
         )
         skills_succeeded = 0
         skills_failed = 0
@@ -233,13 +269,30 @@ class RegistrySyncService:
                     extracted_domains=report.domains,
                     risk_report=risk_report,
                 )
+                observation_context = registry_observation_context_by_skill or {}
+                scan_attribution_context = observation_context.get(
+                    (entry.publisher, entry.repo, entry.skill_slug)
+                )
+                if scan_attribution_context is None:
+                    scan_attribution_context = await self._repository.get_skill_registry_observation_context(
+                        skill_id=skill_id
+                    )
+                scan_observed_at = _coerce_datetime_utc(
+                    (scan_attribution_context or {}).get("observed_at")
+                ) or datetime.now(UTC)
                 await self._repository.record_skill_registry_observation(
                     skill_id=skill_id,
-                    registry_sync_run_id=None,
+                    registry_sync_run_id=(scan_attribution_context or {}).get(
+                        "registry_sync_run_id"
+                    ),
                     repo_snapshot_id=repo_snapshot_id,
-                    observed_at=datetime.now(UTC),
+                    observed_at=scan_observed_at,
                     weekly_installs=entry.weekly_installs,
-                    registry_rank=audit_row.rank if audit_row is not None else None,
+                    registry_rank=(
+                        audit_row.rank
+                        if audit_row is not None
+                        else (scan_attribution_context or {}).get("registry_rank")
+                    ),
                     observation_kind="scan_attribution",
                     raw_payload={
                         "publisher": entry.publisher,
@@ -288,6 +341,9 @@ class RegistrySyncService:
         sitemap_entries: list[SkillSitemapEntry],
         audit_rows: list[AuditRow],
         record_directory_fetch: bool,
+        total_skills_reported: int | None = None,
+        pages_fetched: int | None = None,
+        observed_at: datetime | None = None,
     ) -> tuple[
         dict[tuple[str, str, str], AuditRow],
         dict[tuple[str, str], list[SkillSitemapEntry]],
@@ -310,14 +366,19 @@ class RegistrySyncService:
             for entry in sitemap_entries
         }
         registry_sync_run_id: int | None = None
-        observed_at = datetime.now(UTC)
+        resolved_total_skills_reported, resolved_pages_fetched = _resolve_registry_provenance(
+            sitemap_entries=sitemap_entries,
+            total_skills_reported=total_skills_reported,
+            pages_fetched=pages_fetched,
+        )
+        observed_at = observed_at or datetime.now(UTC)
 
         if record_directory_fetch:
             registry_sync_run_id = await self._repository.record_registry_sync_run(
                 source="skills.sh",
                 view="all-time",
-                total_skills_reported=len(unique_skill_keys),
-                pages_fetched=1 if sitemap_entries else 0,
+                total_skills_reported=resolved_total_skills_reported,
+                pages_fetched=resolved_pages_fetched,
                 success=True,
             )
 
@@ -365,6 +426,35 @@ class RegistrySyncService:
                 )
 
         return audit_map, repo_groups, seen_repos, repo_ids_by_key, unique_skill_keys
+
+
+def _resolve_registry_provenance(
+    *,
+    sitemap_entries: list[SkillSitemapEntry],
+    total_skills_reported: int | None,
+    pages_fetched: int | None,
+) -> tuple[int | None, int]:
+    resolved_total_skills_reported = total_skills_reported
+    if resolved_total_skills_reported is None:
+        resolved_total_skills_reported = getattr(
+            sitemap_entries,
+            "total_skills_reported",
+            None,
+        )
+
+    resolved_pages_fetched = pages_fetched
+    if resolved_pages_fetched is None:
+        resolved_pages_fetched = getattr(sitemap_entries, "pages_fetched", 0)
+
+    return resolved_total_skills_reported, resolved_pages_fetched or 0
+
+
+def _coerce_datetime_utc(value: object | None) -> datetime | None:
+    if value is None or not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 async def _prepare_indicator_context(

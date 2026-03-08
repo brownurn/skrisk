@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from click.testing import CliRunner
 
 from skrisk.cli import cli
@@ -119,13 +121,25 @@ def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> Non
                 )
             ],
             audit_rows=[],
-            total_skills=1,
+            total_skills=500,
+            pages_fetched=4,
         )
 
-    async def fake_seed_registry_snapshot(self, *, sitemap_entries, audit_rows):
+    async def fake_seed_registry_snapshot(
+        self,
+        *,
+        sitemap_entries,
+        audit_rows,
+        total_skills_reported=None,
+        pages_fetched=None,
+        observed_at=None,
+    ):
         assert len(sitemap_entries) == 1
         assert sitemap_entries[0].weekly_installs == 321
         assert audit_rows == []
+        assert total_skills_reported is None
+        assert pages_fetched is None
+        assert observed_at is None
         return {
             "repos_seeded": 1,
             "skills_seeded": 1,
@@ -140,13 +154,14 @@ def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> Non
     result = runner.invoke(cli, ["seed-registry"])
 
     assert result.exit_code == 0
-    assert "Seeded 1 skills across 1 repos from 1 reported rows" in result.output
+    assert "Seeded 1 skills across 1 repos from 500 reported rows" in result.output
 
 
 def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
     monkeypatch.setenv("SKRISK_MIRROR_ROOT", str(tmp_path / "mirrors"))
+    cached_observed_at = datetime(2026, 3, 7, 9, 15, tzinfo=UTC)
 
     async def fake_list_due_repos(self):
         return [
@@ -168,6 +183,8 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
                 "skill_slug": "agent-tools",
                 "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
                 "weekly_installs": 1200,
+                "weekly_installs_observed_at": cached_observed_at,
+                "registry_sync_run_id": 44,
             }
         ]
 
@@ -178,12 +195,14 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
         audit_rows,
         skill_loader,
         record_directory_fetch=True,
+        registry_observation_context_by_skill=None,
     ):
         assert len(sitemap_entries) == 1
         assert sitemap_entries[0].skill_slug == "agent-tools"
         assert sitemap_entries[0].weekly_installs == 1200
         assert audit_rows == []
         assert record_directory_fetch is False
+        assert registry_observation_context_by_skill is None
         return {
             "repos_seen": 1,
             "skills_seen": 1,

@@ -805,6 +805,18 @@ class SkillRepository:
                 for row in rows
             ]
 
+    async def get_skill_registry_observation_context(self, *, skill_id: int) -> dict[str, Any] | None:
+        async with self._session_factory() as session:
+            row = await session.get(Skill, skill_id)
+            if row is None:
+                return None
+            return {
+                "weekly_installs": row.current_weekly_installs,
+                "observed_at": _coerce_datetime_utc(row.current_weekly_installs_observed_at),
+                "registry_rank": row.current_registry_rank,
+                "registry_sync_run_id": row.current_registry_sync_run_id,
+            }
+
     async def list_registry_entries_for_repo_ids(self, repo_ids: list[int]) -> list[dict]:
         if not repo_ids:
             return []
@@ -823,6 +835,10 @@ class SkillRepository:
                     "skill_slug": skill.skill_slug,
                     "registry_url": skill.registry_url,
                     "weekly_installs": skill.current_weekly_installs,
+                    "weekly_installs_observed_at": _coerce_datetime_utc(
+                        skill.current_weekly_installs_observed_at
+                    ),
+                    "registry_sync_run_id": skill.current_registry_sync_run_id,
                 }
                 for skill, repo in result.all()
             ]
