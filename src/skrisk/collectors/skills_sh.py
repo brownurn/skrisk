@@ -129,7 +129,10 @@ def parse_directory_page(
             continue
 
         raw_installs = raw_skill.get("installs")
-        weekly_installs = int(raw_installs) if raw_installs is not None else None
+        try:
+            weekly_installs = int(raw_installs) if raw_installs is not None else None
+        except (TypeError, ValueError):
+            weekly_installs = None
         entries.append(
             SkillSitemapEntry(
                 publisher=publisher,

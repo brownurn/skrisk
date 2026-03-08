@@ -39,6 +39,10 @@ class RegistrySnapshot:
 class SkillsShClient:
     """HTTP client for fetching the public registry surfaces."""
 
+    _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    _DEFAULT_RETRY_DELAY_SECONDS = 30.0
+    _MAX_RETRIES = 6
+
     def __init__(self, base_url: str = "https://skills.sh") -> None:
         self._base_url = base_url.rstrip("/")
 
@@ -55,8 +59,10 @@ class SkillsShClient:
         total_skills = 0
 
         while True:
-            directory_response = await client.get(f"{self._base_url}/api/skills/all-time/{page}")
-            directory_response.raise_for_status()
+            directory_response = await self._get_with_retry(
+                client,
+                f"{self._base_url}/api/skills/all-time/{page}",
+            )
             directory_page = parse_directory_page(directory_response.json(), base_url=self._base_url)
             total_skills = directory_page.total
 
@@ -76,6 +82,33 @@ class SkillsShClient:
             audit_rows=extract_audit_rows(audits_response.text),
             total_skills=total_skills,
         )
+
+    async def _get_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+    ) -> httpx.Response:
+        for attempt in range(self._MAX_RETRIES + 1):
+            response = await client.get(url)
+            if response.status_code not in self._RETRYABLE_STATUS_CODES:
+                response.raise_for_status()
+                return response
+
+            if attempt == self._MAX_RETRIES:
+                response.raise_for_status()
+
+            await asyncio.sleep(self._retry_delay_seconds(response))
+
+        raise RuntimeError(f"Exceeded retry budget for {url}")
+
+    def _retry_delay_seconds(self, response: httpx.Response) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return self._DEFAULT_RETRY_DELAY_SECONDS
 
 
 class GitHubSkillLoader:

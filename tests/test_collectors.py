@@ -123,6 +123,26 @@ def test_parse_directory_page_extracts_registry_entries() -> None:
     assert page.entries[1].weekly_installs is None
 
 
+def test_parse_directory_page_treats_malformed_installs_as_missing() -> None:
+    payload = {
+        "page": 0,
+        "total": 1,
+        "hasMore": False,
+        "skills": [
+            {
+                "source": "melurna/skills",
+                "skillId": "impact-analyzer",
+                "installs": "not-a-number",
+            }
+        ],
+    }
+
+    page = parse_directory_page(payload)
+
+    assert len(page.entries) == 1
+    assert page.entries[0].weekly_installs is None
+
+
 async def test_skills_sh_client_fetch_snapshot_pages_through_directory_api() -> None:
     import httpx
 
@@ -193,3 +213,52 @@ async def test_skills_sh_client_fetch_snapshot_pages_through_directory_api() -> 
     assert snapshot.sitemap_entries[0].weekly_installs == 100
     assert snapshot.sitemap_entries[1].weekly_installs == 90
     assert snapshot.sitemap_entries[2].weekly_installs == 80
+
+
+async def test_skills_sh_client_retries_rate_limited_directory_pages(monkeypatch) -> None:
+    import asyncio
+    import httpx
+
+    from skrisk.services.sync import SkillsShClient
+
+    page_attempts = 0
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal page_attempts
+        if request.url.path == "/audits":
+            return httpx.Response(200, text="<html><body>no audits rows</body></html>")
+        if request.url.path == "/api/skills/all-time/0":
+            page_attempts += 1
+            if page_attempts == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"})
+            return httpx.Response(
+                200,
+                json={
+                    "page": 0,
+                    "total": 1,
+                    "hasMore": False,
+                    "skills": [
+                        {
+                            "source": "tul-sh/skills",
+                            "skillId": "agent-tools",
+                            "installs": 77,
+                        }
+                    ],
+                },
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://skills.sh") as client:
+        snapshot = await SkillsShClient("https://skills.sh").fetch_snapshot(client)
+
+    assert page_attempts == 2
+    assert sleep_calls == [0.0]
+    assert snapshot.sitemap_entries[0].weekly_installs == 77
