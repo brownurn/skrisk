@@ -7,6 +7,7 @@ import type {
 	IndicatorMatch,
 	IndicatorObservation,
 	IndicatorSummary,
+	InstallHistoryEntry,
 	LinkedSkill,
 	OverviewData,
 	RiskFinding,
@@ -41,6 +42,15 @@ function emptySnapshot(): SkillSnapshot {
 		riskReport: normalizeRiskReport(undefined),
 		indicatorLinks: []
 	};
+}
+
+function normalizeMaybeNumber(value: unknown): number | null {
+	if (value === null || value === undefined || value === '') {
+		return null;
+	}
+
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeStats(raw: Record<string, number>, pendingVtQueue: number): DashboardStats {
@@ -139,7 +149,32 @@ function normalizeSkillSummary(raw: Record<string, unknown>): SkillSummary {
 		repo: String(raw.repo ?? ''),
 		skillSlug: String(raw.skill_slug ?? ''),
 		title: String(raw.title ?? ''),
+		currentWeeklyInstalls: normalizeMaybeNumber(raw.current_weekly_installs),
+		currentWeeklyInstallsObservedAt: raw.current_weekly_installs_observed_at
+			? String(raw.current_weekly_installs_observed_at)
+			: null,
+		peakWeeklyInstalls: normalizeMaybeNumber(raw.peak_weekly_installs),
+		weeklyInstallsDelta: normalizeMaybeNumber(raw.weekly_installs_delta),
+		impactScore: Number(raw.impact_score ?? 0),
+		priorityScore: Number(raw.priority_score ?? 0),
 		latestSnapshot: normalizeSnapshot(raw.latest_snapshot as Record<string, unknown>)
+	};
+}
+
+function normalizeInstallHistoryEntry(raw: Record<string, unknown>): InstallHistoryEntry {
+	return {
+		id: Number(raw.id ?? 0),
+		skillId: Number(raw.skill_id ?? 0),
+		registrySyncRunId: normalizeMaybeNumber(raw.registry_sync_run_id),
+		repoSnapshotId: normalizeMaybeNumber(raw.repo_snapshot_id),
+		observedAt: raw.observed_at ? String(raw.observed_at) : null,
+		weeklyInstalls: normalizeMaybeNumber(raw.weekly_installs),
+		registryRank: normalizeMaybeNumber(raw.registry_rank),
+		observationKind: String(raw.observation_kind ?? ''),
+		rawPayload:
+			raw.raw_payload && typeof raw.raw_payload === 'object'
+				? (raw.raw_payload as Record<string, unknown>)
+				: null
 	};
 }
 
@@ -237,7 +272,10 @@ export async function loadOverview(fetcher: Fetcher): Promise<OverviewData> {
 }
 
 export async function loadSkills(fetcher: Fetcher): Promise<SkillSummary[]> {
-	const rawSkills = await requestJson<Record<string, unknown>[]>(fetcher, '/api/skills?limit=0');
+	const rawSkills = await requestJson<Record<string, unknown>[]>(
+		fetcher,
+		'/api/skills?limit=0&sort=priority'
+	);
 	return rawSkills.map((item) => normalizeSkillSummary(item));
 }
 
@@ -258,6 +296,9 @@ export async function loadSkillDetail(
 		registryUrl: raw.registry_url ? String(raw.registry_url) : '',
 		externalVerdicts: Array.isArray(raw.external_verdicts)
 			? raw.external_verdicts.map((item) => normalizeExternalVerdict(item as Record<string, unknown>))
+			: [],
+		installHistory: Array.isArray(raw.install_history)
+			? raw.install_history.map((item) => normalizeInstallHistoryEntry(item as Record<string, unknown>))
 			: []
 	};
 }

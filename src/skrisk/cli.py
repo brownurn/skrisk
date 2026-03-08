@@ -68,6 +68,8 @@ def sync_registry_command() -> None:
             sitemap_entries=snapshot.sitemap_entries,
             audit_rows=snapshot.audit_rows,
             skill_loader=loader,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
         )
         click.echo(
             "Discovered "
@@ -148,6 +150,97 @@ def scan_due_command(limit_repos: int) -> None:
             sitemap_entries=filtered_entries,
             audit_rows=[],
             skill_loader=loader,
+        )
+        click.echo(
+            f"Scanned {summary['skills_seen']} skills across {summary['repos_seen']} repos "
+            f"from {len(due_repos)} due repos"
+        )
+
+    from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("seed-registry")
+def seed_registry_command() -> None:
+    """Fetch the public registry and seed repo/skill metadata without deep repo analysis."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        snapshot = await SkillsShClient(settings.skills_sh_base_url).fetch_snapshot()
+        summary = await RegistrySyncService(
+            session_factory=session_factory,
+            analyzer=SkillAnalyzer(),
+        ).seed_registry_snapshot(
+            sitemap_entries=snapshot.sitemap_entries,
+            audit_rows=snapshot.audit_rows,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
+        )
+        click.echo(
+            "Seeded "
+            f"{summary['skills_seeded']} skills across {summary['repos_seeded']} repos "
+            f"from {snapshot.total_skills or len(snapshot.sitemap_entries)} reported rows"
+        )
+
+    from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("scan-due")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+def scan_due_command(limit_repos: int) -> None:
+    """Scan a bounded set of repos that are due for analysis."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.mirror_root.mkdir(parents=True, exist_ok=True)
+
+        repository = SkillRepository(session_factory)
+        due_repos = await repository.list_due_repos()
+        due_repos = sorted(due_repos, key=_repo_sort_key)[:limit_repos]
+        if not due_repos:
+            click.echo("No due repos")
+            return
+
+        tracked_entries = await repository.list_registry_entries_for_repo_ids(
+            [row["id"] for row in due_repos]
+        )
+        filtered_entries = [
+            SkillSitemapEntry(
+                publisher=row["publisher"],
+                repo=row["repo"],
+                skill_slug=row["skill_slug"],
+                url=row["registry_url"],
+                weekly_installs=row["weekly_installs"],
+            )
+            for row in tracked_entries
+        ]
+        registry_observation_context_by_skill = {
+            (row["publisher"], row["repo"], row["skill_slug"]): {
+                "observed_at": row["weekly_installs_observed_at"],
+                "registry_rank": row["registry_rank"],
+                "registry_sync_run_id": row["registry_sync_run_id"],
+            }
+            for row in tracked_entries
+        }
+        loader = GitHubSkillLoader(settings.mirror_root)
+        summary = await RegistrySyncService(
+            session_factory=session_factory,
+            analyzer=SkillAnalyzer(),
+        ).ingest_registry_snapshot(
+            sitemap_entries=filtered_entries,
+            audit_rows=[],
+            skill_loader=loader,
+            record_directory_fetch=False,
+            registry_observation_context_by_skill=registry_observation_context_by_skill,
         )
         click.echo(
             f"Scanned {summary['skills_seen']} skills across {summary['repos_seen']} repos "
@@ -247,6 +340,8 @@ def collect_once() -> None:
             sitemap_entries=snapshot.sitemap_entries,
             audit_rows=snapshot.audit_rows,
             skill_loader=loader,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
         )
         click.echo(summary)
 

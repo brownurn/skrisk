@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import asyncio
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from skrisk.storage.models import Base
+
+_LEGACY_SKILLS_COLUMN_MIGRATIONS = {
+    "current_weekly_installs": "INTEGER",
+    "current_weekly_installs_observed_at": "DATETIME",
+    "current_registry_rank": "INTEGER",
+    "current_registry_sync_run_id": "INTEGER",
+}
 
 
 def create_sqlite_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
@@ -25,6 +33,7 @@ async def init_db(session_factory: async_sessionmaker[AsyncSession]) -> None:
     engine: AsyncEngine = getattr(session_factory, "engine")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_run_sqlite_additive_migrations)
     setattr(session_factory, "_initialized", True)
 
 
@@ -38,3 +47,21 @@ async def ensure_initialized(session_factory: async_sessionmaker[AsyncSession]) 
         if getattr(session_factory, "_initialized", False):
             return
         await init_db(session_factory)
+
+
+def _run_sqlite_additive_migrations(connection) -> None:
+    if connection.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(connection)
+    if "skills" not in inspector.get_table_names():
+        return
+
+    existing_columns = {
+        column["name"]
+        for column in inspector.get_columns("skills")
+    }
+    for column_name, column_type in _LEGACY_SKILLS_COLUMN_MIGRATIONS.items():
+        if column_name in existing_columns:
+            continue
+        connection.execute(text(f"ALTER TABLE skills ADD COLUMN {column_name} {column_type}"))

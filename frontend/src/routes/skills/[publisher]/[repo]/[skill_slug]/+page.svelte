@@ -1,7 +1,16 @@
 <script lang="ts">
 	import {
 		buildIndicatorHref,
+		formatInstallDelta,
+		formatInstallHistoryContext,
+		formatObservationKind,
+		formatObservedAt,
 		formatOptional,
+		formatWeeklyInstalls,
+		installTrendLabel,
+		installTrendTone,
+		priorityCardTone,
+		priorityTone,
 		severityTone
 	} from '$lib/presenters';
 	import type { SkillDetail, SkillIndicatorLink } from '$lib/types';
@@ -10,6 +19,7 @@
 
 	const snapshot = $derived(data.skill.latestSnapshot);
 	const indicatorLinks = $derived(snapshot.indicatorLinks ?? []);
+	const installHistory = $derived(data.skill.installHistory ?? []);
 
 	function linkHref(link: SkillIndicatorLink): string {
 		return buildIndicatorHref(link.indicatorType ?? 'domain', link.indicatorValue ?? '');
@@ -32,6 +42,11 @@
 				<span class="badge" data-level={severityTone(snapshot.riskReport.severity)}>
 					{snapshot.riskReport.severity}
 				</span>
+				<span class="badge" data-level={priorityTone(data.skill.priorityScore)}>
+					priority {data.skill.priorityScore}
+				</span>
+				<span class="token">impact {data.skill.impactScore}</span>
+				<span class="token">weekly installs {formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</span>
 				<span class="token">version {snapshot.versionLabel || 'unknown'}</span>
 				<span class="token">confidence {snapshot.riskReport.confidence ?? 'unscored'}</span>
 			</div>
@@ -43,6 +58,18 @@
 				<strong class="mono">{data.skill.relativePath}</strong>
 			</div>
 			<div class="kpi-line">
+				<span class="muted">Latest installs</span>
+				<strong>{formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</strong>
+			</div>
+			<div class="kpi-line">
+				<span class="muted">Peak installs</span>
+				<strong>{formatWeeklyInstalls(data.skill.peakWeeklyInstalls)}</strong>
+			</div>
+			<div class="kpi-line">
+				<span class="muted">Last observed</span>
+				<strong>{formatObservedAt(data.skill.currentWeeklyInstallsObservedAt)}</strong>
+			</div>
+			<div class="kpi-line">
 				<span class="muted">Risk score</span>
 				<strong>{snapshot.riskReport.score}</strong>
 			</div>
@@ -50,15 +77,36 @@
 				<span class="muted">Indicators</span>
 				<strong>{indicatorLinks.length}</strong>
 			</div>
-			<div class="kpi-line">
-				<span class="muted">Domains</span>
-				<strong>{snapshot.extractedDomains.length}</strong>
-			</div>
 		</div>
 	</div>
 </section>
 
 <section class="metric-grid">
+	<article class="metric-card">
+		<p class="metric-label">Latest Weekly Installs</p>
+		<p class="metric-value">{formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</p>
+		<p class="muted">{formatObservedAt(data.skill.currentWeeklyInstallsObservedAt)}</p>
+	</article>
+	<article class="metric-card">
+		<p class="metric-label">Peak Weekly Installs</p>
+		<p class="metric-value">{formatWeeklyInstalls(data.skill.peakWeeklyInstalls)}</p>
+		<p class="muted">Highest observed footprint</p>
+	</article>
+	<article class="metric-card" data-tone={installTrendTone(data.skill.weeklyInstallsDelta)}>
+		<p class="metric-label">Install Delta</p>
+		<p class="metric-value">{formatInstallDelta(data.skill.weeklyInstallsDelta)}</p>
+		<p class="muted">{installTrendLabel(data.skill.weeklyInstallsDelta)} week over week</p>
+	</article>
+	<article class="metric-card" data-tone={priorityCardTone(data.skill.priorityScore)}>
+		<p class="metric-label">Priority</p>
+		<p class="metric-value">{data.skill.priorityScore}</p>
+		<p class="muted">Risk and reach combined</p>
+	</article>
+	<article class="metric-card" data-tone="accent">
+		<p class="metric-label">Impact</p>
+		<p class="metric-value">{data.skill.impactScore}</p>
+		<p class="muted">Install footprint only</p>
+	</article>
 	<article class="metric-card">
 		<p class="metric-label">Behavior Score</p>
 		<p class="metric-value">{snapshot.riskReport.behaviorScore ?? 0}</p>
@@ -186,6 +234,44 @@
 			</div>
 		</div>
 	</div>
+</section>
+
+<section class="table-card page-section">
+	<div class="table-header">
+		<div>
+			<p class="table-label">Install telemetry</p>
+			<h2>Install history</h2>
+		</div>
+	</div>
+
+	{#if installHistory.length > 0}
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>Observed</th>
+						<th>Weekly installs</th>
+						<th>Observation</th>
+						<th>Context</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each installHistory as entry}
+						<tr>
+							<td class="mono">{formatObservedAt(entry.observedAt)}</td>
+							<td class="mono">{formatWeeklyInstalls(entry.weeklyInstalls)}</td>
+							<td>{formatObservationKind(entry.observationKind)}</td>
+							<td>{formatInstallHistoryContext(entry)}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{:else}
+		<div class="empty-state">
+			Install telemetry will appear after the next registry sync or scan attribution.
+		</div>
+	{/if}
 </section>
 
 <section class="table-card page-section">

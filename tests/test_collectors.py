@@ -105,6 +105,8 @@ def test_parse_directory_page_extracts_registry_entries() -> None:
     assert [entry.repo for entry in page.entries] == ["skills", "agent-skills"]
     assert [entry.skill_slug for entry in page.entries] == ["agent-tools", "frontend-design"]
     assert page.entries[0].url == "https://skills.sh/tul-sh/skills/agent-tools"
+    assert page.entries[0].weekly_installs == 1234
+    assert page.entries[1].weekly_installs == 567
 
 
 @pytest.mark.asyncio
@@ -189,11 +191,15 @@ async def test_skills_sh_client_fetch_snapshot_pages_through_directory_api() -> 
         "/audits",
     }
     assert snapshot.total_skills == 3
+    assert snapshot.pages_fetched == 2
     assert [entry.skill_slug for entry in snapshot.sitemap_entries] == [
         "agent-tools",
         "find-skills",
         "frontend-design",
     ]
+    assert snapshot.sitemap_entries[0].weekly_installs == 100
+    assert snapshot.sitemap_entries[1].weekly_installs == 90
+    assert snapshot.sitemap_entries[2].weekly_installs == 80
     assert snapshot.audit_rows[0].partners["snyk"].verdict == "HIGH"
 
 
@@ -240,7 +246,9 @@ async def test_skills_sh_client_retries_rate_limited_directory_pages(
     assert attempts["page_0"] == 2
     assert slept == [30.0]
     assert snapshot.total_skills == 1
+    assert snapshot.pages_fetched == 1
     assert [entry.skill_slug for entry in snapshot.sitemap_entries] == ["agent-tools"]
+    assert snapshot.sitemap_entries[0].weekly_installs == 100
 
 
 def test_discover_skills_in_checkout_finds_supported_skill_locations(

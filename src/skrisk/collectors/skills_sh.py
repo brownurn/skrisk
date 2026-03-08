@@ -21,6 +21,7 @@ class SkillSitemapEntry:
     repo: str
     skill_slug: str
     url: str
+    weekly_installs: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,12 +128,18 @@ def parse_directory_page(
         if not publisher or not repo or not skill_slug:
             continue
 
+        raw_installs = raw_skill.get("installs")
+        try:
+            weekly_installs = int(raw_installs) if raw_installs is not None else None
+        except (TypeError, ValueError):
+            weekly_installs = None
         entries.append(
             SkillSitemapEntry(
                 publisher=publisher,
                 repo=repo,
                 skill_slug=skill_slug,
                 url=f"{base_url}/{publisher}/{repo}/{skill_slug}",
+                weekly_installs=weekly_installs,
             )
         )
 
