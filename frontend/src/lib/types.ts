@@ -64,11 +64,29 @@ export interface SkillSnapshot {
 	indicatorLinks?: SkillIndicatorLink[];
 }
 
+export interface InstallHistoryEntry {
+	id: number;
+	skillId: number;
+	registrySyncRunId: number | null;
+	repoSnapshotId: number | null;
+	observedAt: string | null;
+	weeklyInstalls: number | null;
+	registryRank: number | null;
+	observationKind: string;
+	rawPayload: Record<string, unknown> | null;
+}
+
 export interface SkillSummary {
 	publisher: string;
 	repo: string;
 	skillSlug: string;
 	title: string;
+	currentWeeklyInstalls: number | null;
+	currentWeeklyInstallsObservedAt: string | null;
+	peakWeeklyInstalls: number | null;
+	weeklyInstallsDelta: number | null;
+	impactScore: number;
+	priorityScore: number;
 	latestSnapshot: SkillSnapshot;
 }
 
@@ -83,6 +101,7 @@ export interface SkillDetail extends SkillSummary {
 	relativePath?: string;
 	registryUrl?: string;
 	externalVerdicts: ExternalVerdict[];
+	installHistory: InstallHistoryEntry[];
 }
 
 export interface FeedArtifact {
