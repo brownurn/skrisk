@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
+import sqlite3
 import subprocess
 
 import pytest
@@ -193,3 +195,103 @@ async def test_registry_sync_creates_one_repo_snapshot_per_repo_and_isolates_fai
     assert summary["skills_failed"] == 1
     assert repo_snapshot_count == 1
     assert skill_snapshot_count == 2
+
+
+@pytest.mark.asyncio
+async def test_init_db_adds_missing_install_columns_to_legacy_skills_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE skill_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            publisher VARCHAR(255) NOT NULL,
+            repo VARCHAR(255) NOT NULL,
+            source_url VARCHAR(2000) NOT NULL,
+            registry_rank INTEGER,
+            last_scanned_at DATETIME,
+            next_scan_at DATETIME,
+            created_at DATETIME,
+            updated_at DATETIME,
+            UNIQUE(publisher, repo)
+        );
+        CREATE TABLE skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL,
+            skill_slug VARCHAR(255) NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            relative_path VARCHAR(1000) NOT NULL,
+            registry_url VARCHAR(2000) NOT NULL,
+            created_at DATETIME,
+            updated_at DATETIME,
+            UNIQUE(repo_id, skill_slug)
+        );
+        INSERT INTO skill_repos (id, publisher, repo, source_url, registry_rank)
+        VALUES (1, 'melurna', 'skill-pack', 'https://github.com/melurna/skill-pack', 2);
+        INSERT INTO skills (id, repo_id, skill_slug, title, relative_path, registry_url)
+        VALUES (
+            1,
+            1,
+            'seed-only',
+            'Seed Only',
+            'registry/seed-only',
+            'https://skills.sh/melurna/skill-pack/seed-only'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{db_path}")
+    await init_db(session_factory)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    run_id = await repository.record_registry_sync_run(
+        source="skills.sh",
+        view="all-time",
+        total_skills_reported=250,
+        pages_fetched=4,
+        success=True,
+    )
+    await repository.record_skill_registry_observation(
+        skill_id=1,
+        registry_sync_run_id=run_id,
+        repo_snapshot_id=None,
+        observed_at=datetime(2026, 3, 7, 8, 0, tzinfo=UTC),
+        weekly_installs=42,
+        registry_rank=2,
+        observation_kind="directory_fetch",
+        raw_payload={"installs": 42},
+    )
+
+    skills = await repository.list_skills(limit=0)
+
+    reopened = sqlite3.connect(db_path)
+    columns = {
+        row[1]
+        for row in reopened.execute("PRAGMA table_info(skills)")
+    }
+    reopened.close()
+
+    assert {
+        "current_weekly_installs",
+        "current_weekly_installs_observed_at",
+        "current_registry_rank",
+        "current_registry_sync_run_id",
+    }.issubset(columns)
+    assert skills == [
+        {
+            "publisher": "melurna",
+            "repo": "skill-pack",
+            "skill_slug": "seed-only",
+            "title": "Seed Only",
+            "current_weekly_installs": 42,
+            "current_weekly_installs_observed_at": "2026-03-07T08:00:00+00:00",
+            "peak_weekly_installs": 42,
+            "weekly_installs_delta": None,
+            "impact_score": 15,
+            "priority_score": 0,
+            "latest_snapshot": None,
+        }
+    ]

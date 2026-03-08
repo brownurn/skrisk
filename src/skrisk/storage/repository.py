@@ -522,12 +522,13 @@ class SkillRepository:
                     repo=repo,
                     source_url=source_url,
                     registry_rank=registry_rank,
-                    next_scan_at=datetime.now(UTC) + timedelta(hours=scan_interval_hours),
+                    next_scan_at=None,
                 )
                 session.add(row)
             else:
                 row.source_url = source_url
-                row.registry_rank = registry_rank
+                if registry_rank is not None:
+                    row.registry_rank = registry_rank
 
             await session.commit()
             await session.refresh(row)
@@ -558,7 +559,7 @@ class SkillRepository:
         *,
         repo_id: int,
         skill_slug: str,
-        title: str,
+        title: str | None,
         relative_path: str,
         registry_url: str,
     ) -> int:
@@ -574,13 +575,14 @@ class SkillRepository:
                 row = Skill(
                     repo_id=repo_id,
                     skill_slug=skill_slug,
-                    title=title,
+                    title=title or skill_slug,
                     relative_path=relative_path,
                     registry_url=registry_url,
                 )
                 session.add(row)
             else:
-                row.title = title
+                if title is not None:
+                    row.title = title
                 row.relative_path = relative_path
                 row.registry_url = registry_url
 
@@ -646,17 +648,20 @@ class SkillRepository:
             critical_skills = sum(
                 1
                 for _, _, snapshot_row in latest_rows
-                if (snapshot_row.risk_report or {}).get("severity") == "critical"
+                if snapshot_row is not None
+                and (snapshot_row.risk_report or {}).get("severity") == "critical"
             )
             high_risk_skills = sum(
                 1
                 for _, _, snapshot_row in latest_rows
-                if (snapshot_row.risk_report or {}).get("severity") in {"critical", "high"}
+                if snapshot_row is not None
+                and (snapshot_row.risk_report or {}).get("severity") in {"critical", "high"}
             )
             intel_backed_findings = sum(
                 1
                 for _, _, snapshot_row in latest_rows
-                if (snapshot_row.risk_report or {}).get("indicator_matches")
+                if snapshot_row is not None
+                and (snapshot_row.risk_report or {}).get("indicator_matches")
             )
             return {
                 "tracked_repos": int(tracked_repos or 0),
@@ -683,7 +688,7 @@ class SkillRepository:
             )
             enriched_rows = []
             for skill_row, repo_row, snapshot_row in rows:
-                risk_report = snapshot_row.risk_report or {}
+                risk_report = snapshot_row.risk_report if snapshot_row is not None else {}
                 if severity is not None and risk_report.get("severity") != severity:
                     continue
                 if min_weekly_installs is not None and (
@@ -716,14 +721,18 @@ class SkillRepository:
                         "weekly_installs_delta": telemetry["weekly_installs_delta"],
                         "impact_score": telemetry["impact_score"],
                         "priority_score": telemetry["priority_score"],
-                        "latest_snapshot": {
-                            "id": snapshot_row.id,
-                            "version_label": snapshot_row.version_label,
-                            "folder_hash": snapshot_row.folder_hash,
-                            "referenced_files": snapshot_row.referenced_files,
-                            "extracted_domains": snapshot_row.extracted_domains,
-                            "risk_report": snapshot_row.risk_report,
-                        },
+                        "latest_snapshot": (
+                            {
+                                "id": snapshot_row.id,
+                                "version_label": snapshot_row.version_label,
+                                "folder_hash": snapshot_row.folder_hash,
+                                "referenced_files": snapshot_row.referenced_files,
+                                "extracted_domains": snapshot_row.extracted_domains,
+                                "risk_report": snapshot_row.risk_report,
+                            }
+                            if snapshot_row is not None
+                            else None
+                        ),
                     }
                 )
 
@@ -804,18 +813,21 @@ class SkillRepository:
     async def _load_latest_skill_rows(
         self,
         session: AsyncSession,
-    ) -> list[tuple[Skill, SkillRepo, SkillSnapshot]]:
+    ) -> list[tuple[Skill, SkillRepo, SkillSnapshot | None]]:
         latest_snapshot_ids = (
-            select(func.max(SkillSnapshot.id))
+            select(
+                SkillSnapshot.skill_id.label("skill_id"),
+                func.max(SkillSnapshot.id).label("latest_snapshot_id"),
+            )
             .group_by(SkillSnapshot.skill_id)
-            .scalar_subquery()
+            .subquery()
         )
         result = await session.execute(
             select(Skill, SkillRepo, SkillSnapshot)
             .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-            .join(SkillSnapshot, SkillSnapshot.skill_id == Skill.id)
-            .where(SkillSnapshot.id.in_(latest_snapshot_ids))
-            .order_by(SkillSnapshot.id.desc())
+            .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
+            .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
+            .order_by(SkillSnapshot.id.desc().nulls_last(), Skill.id.desc())
         )
         return list(result.all())
 
@@ -1025,8 +1037,8 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             key=lambda item: (
                 item["priority_score"],
                 _sort_weekly_installs_value(item["current_weekly_installs"]),
-                item["latest_snapshot"]["risk_report"].get("score", 0),
-                item["latest_snapshot"]["id"],
+                _sort_latest_snapshot_risk_score(item),
+                _sort_latest_snapshot_id(item),
             ),
             reverse=True,
         )
@@ -1034,9 +1046,9 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
     if sort == "risk":
         rows.sort(
             key=lambda item: (
-                item["latest_snapshot"]["risk_report"].get("score", 0),
+                _sort_latest_snapshot_risk_score(item),
                 item["priority_score"],
-                item["latest_snapshot"]["id"],
+                _sort_latest_snapshot_id(item),
             ),
             reverse=True,
         )
@@ -1046,7 +1058,7 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             key=lambda item: (
                 _sort_weekly_installs_value(item["current_weekly_installs"]),
                 item["priority_score"],
-                item["latest_snapshot"]["id"],
+                _sort_latest_snapshot_id(item),
             ),
             reverse=True,
         )
@@ -1056,7 +1068,7 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             key=lambda item: (
                 item["weekly_installs_delta"] if item["weekly_installs_delta"] is not None else -10**9,
                 _sort_weekly_installs_value(item["current_weekly_installs"]),
-                item["latest_snapshot"]["id"],
+                _sort_latest_snapshot_id(item),
             ),
             reverse=True,
         )
@@ -1065,6 +1077,17 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
 
 def _sort_weekly_installs_value(value: int | None) -> int:
     return -1 if value is None else value
+
+
+def _sort_latest_snapshot_id(item: dict[str, Any]) -> int:
+    latest_snapshot = item.get("latest_snapshot") or {}
+    return int(latest_snapshot.get("id") or -1)
+
+
+def _sort_latest_snapshot_risk_score(item: dict[str, Any]) -> int:
+    latest_snapshot = item.get("latest_snapshot") or {}
+    risk_report = latest_snapshot.get("risk_report") or {}
+    return int(risk_report.get("score") or 0)
 
 
 def _build_install_telemetry(

@@ -207,6 +207,15 @@ async def test_registry_sync_service_can_seed_registry_without_repo_analysis(
     assert summary["skills_seeded"] == 2
     assert stats["tracked_repos"] == 1
     assert stats["tracked_skills"] == 2
+    assert await repository.list_due_repos() == [
+        {
+            "id": 1,
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "source_url": "https://github.com/tul-sh/skills",
+            "registry_rank": None,
+        }
+    ]
     assert detail is not None
     assert detail["latest_snapshot"] is None
     assert detail["current_weekly_installs"] == 75
@@ -442,3 +451,86 @@ async def test_registry_sync_service_preserves_none_rank_for_unranked_skill_scan
     assert observations[1]["observed_at"] == cached_observed_at.isoformat()
     assert observations[1]["registry_sync_run_id"] == observations[0]["registry_sync_run_id"] == 1
     assert observations[1]["registry_rank"] is None
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_service_preserves_rank_and_title_when_scan_due_has_no_audit_rows(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'preserve-metadata.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    service = RegistrySyncService(
+        session_factory=session_factory,
+        analyzer=SkillAnalyzer(),
+    )
+    observed_at = datetime(2026, 3, 7, 8, 0, tzinfo=UTC)
+    sitemap_entries = [
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=600,
+        )
+    ]
+    audit_rows = [
+        AuditRow(
+            rank=5,
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            name="Agent Tools",
+            partners={},
+        )
+    ]
+
+    await service.seed_registry_snapshot(
+        sitemap_entries=sitemap_entries,
+        audit_rows=audit_rows,
+        total_skills_reported=600,
+        pages_fetched=2,
+        observed_at=observed_at,
+    )
+
+    repository = SkillRepository(session_factory)
+    tracked_entries = await repository.list_registry_entries_for_repo_ids([1])
+    registry_observation_context_by_skill = {
+        (entry["publisher"], entry["repo"], entry["skill_slug"]): {
+            "observed_at": entry["weekly_installs_observed_at"],
+            "registry_rank": entry["registry_rank"],
+            "registry_sync_run_id": entry["registry_sync_run_id"],
+        }
+        for entry in tracked_entries
+    }
+
+    async def loader(_: SkillSitemapEntry) -> tuple[str, dict[str, str]]:
+        return (
+            "abc123",
+            {
+                "SKILL.md": "---\nname: agent-tools\ndescription: helper\n---\n",
+            },
+        )
+
+    await service.ingest_registry_snapshot(
+        sitemap_entries=sitemap_entries,
+        audit_rows=[],
+        skill_loader=loader,
+        record_directory_fetch=False,
+        registry_observation_context_by_skill=registry_observation_context_by_skill,
+    )
+
+    async with session_factory() as session:
+        repo_row = await session.scalar(
+            select(SkillRepo).where(
+                SkillRepo.publisher == "tul-sh",
+                SkillRepo.repo == "skills",
+            )
+        )
+        skill_row = await session.scalar(select(Skill).where(Skill.skill_slug == "agent-tools"))
+
+    assert repo_row is not None
+    assert repo_row.registry_rank == 5
+    assert skill_row is not None
+    assert skill_row.title == "Agent Tools"

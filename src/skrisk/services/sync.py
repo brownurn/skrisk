@@ -237,7 +237,7 @@ class RegistrySyncService:
                 skill_id = await self._repository.upsert_skill(
                     repo_id=repo_id,
                     skill_slug=entry.skill_slug,
-                    title=audit_row.name if audit_row is not None else entry.skill_slug,
+                    title=audit_row.name if audit_row is not None else None,
                     relative_path=f"skills/{entry.skill_slug}",
                     registry_url=entry.url,
                 )
@@ -402,7 +402,7 @@ class RegistrySyncService:
                 skill_id = await self._repository.upsert_skill(
                     repo_id=repo_id,
                     skill_slug=entry.skill_slug,
-                    title=audit_row.name if audit_row is not None else entry.skill_slug,
+                    title=audit_row.name if audit_row is not None else None,
                     relative_path=f"registry/{entry.skill_slug}",
                     registry_url=entry.url,
                 )

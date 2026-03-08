@@ -342,6 +342,60 @@ async def test_api_skills_support_install_filters_and_sorting(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_skills_includes_seed_only_skills_with_install_telemetry(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'seed-only.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="melurna",
+        repo="skill-pack",
+        source_url="https://github.com/melurna/skill-pack",
+        registry_rank=2,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="seed-only",
+        title="Seed Only",
+        relative_path="registry/seed-only",
+        registry_url="https://skills.sh/melurna/skill-pack/seed-only",
+    )
+    run_id = await repository.record_registry_sync_run(
+        source="skills.sh",
+        view="all-time",
+        total_skills_reported=250,
+        pages_fetched=3,
+        success=True,
+    )
+    await repository.record_skill_registry_observation(
+        skill_id=skill_id,
+        registry_sync_run_id=run_id,
+        repo_snapshot_id=None,
+        observed_at=datetime(2026, 3, 7, 8, 0, tzinfo=UTC),
+        weekly_installs=480,
+        registry_rank=2,
+        observation_kind="directory_fetch",
+        raw_payload={"installs": 480},
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/skills?limit=0")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["skill_slug"] == "seed-only"
+    assert payload[0]["current_weekly_installs"] == 480
+    assert payload[0]["latest_snapshot"] is None
+
+
+@pytest.mark.asyncio
 async def test_api_skills_default_and_priority_sort_break_ties_by_installs(tmp_path) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'priority-ties.db'}"
     session_factory = create_sqlite_session_factory(database_url)
