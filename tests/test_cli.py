@@ -137,8 +137,8 @@ def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> Non
         assert len(sitemap_entries) == 1
         assert sitemap_entries[0].weekly_installs == 321
         assert audit_rows == []
-        assert total_skills_reported is None
-        assert pages_fetched is None
+        assert total_skills_reported == 500
+        assert pages_fetched == 4
         assert observed_at is None
         return {
             "repos_seeded": 1,
@@ -155,6 +155,69 @@ def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> Non
 
     assert result.exit_code == 0
     assert "Seeded 1 skills across 1 repos from 500 reported rows" in result.output
+
+
+def test_sync_registry_cli_passes_snapshot_metadata_to_ingest_service(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKRISK_MIRROR_ROOT", str(tmp_path / "mirrors"))
+
+    async def fake_fetch_snapshot(self):
+        return RegistrySnapshot(
+            sitemap_entries=[
+                SkillSitemapEntry(
+                    publisher="tul-sh",
+                    repo="skills",
+                    skill_slug="agent-tools",
+                    url="https://skills.sh/tul-sh/skills/agent-tools",
+                    weekly_installs=321,
+                )
+            ],
+            audit_rows=[],
+            total_skills=500,
+            pages_fetched=4,
+        )
+
+    async def fake_ingest_registry_snapshot(
+        self,
+        *,
+        sitemap_entries,
+        audit_rows,
+        skill_loader,
+        record_directory_fetch=True,
+        total_skills_reported=None,
+        pages_fetched=None,
+        observed_at=None,
+        registry_observation_context_by_skill=None,
+    ):
+        assert len(sitemap_entries) == 1
+        assert sitemap_entries[0].weekly_installs == 321
+        assert audit_rows == []
+        assert callable(skill_loader)
+        assert record_directory_fetch is True
+        assert total_skills_reported == 500
+        assert pages_fetched == 4
+        assert observed_at is None
+        assert registry_observation_context_by_skill is None
+        return {
+            "repos_seen": 1,
+            "skills_seen": 1,
+            "skills_failed": 0,
+        }
+
+    monkeypatch.setattr("skrisk.services.sync.SkillsShClient.fetch_snapshot", fake_fetch_snapshot)
+    monkeypatch.setattr(
+        "skrisk.services.sync.RegistrySyncService.ingest_registry_snapshot",
+        fake_ingest_registry_snapshot,
+    )
+
+    result = runner.invoke(cli, ["sync-registry"])
+
+    assert result.exit_code == 0
+    assert "Synchronized 1 skills across 1 repos" in result.output
 
 
 def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> None:
@@ -184,6 +247,7 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
                 "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
                 "weekly_installs": 1200,
                 "weekly_installs_observed_at": cached_observed_at,
+                "registry_rank": 9,
                 "registry_sync_run_id": 44,
             }
         ]
@@ -202,7 +266,13 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
         assert sitemap_entries[0].weekly_installs == 1200
         assert audit_rows == []
         assert record_directory_fetch is False
-        assert registry_observation_context_by_skill is None
+        assert registry_observation_context_by_skill == {
+            ("tul-sh", "skills", "agent-tools"): {
+                "observed_at": cached_observed_at,
+                "registry_rank": 9,
+                "registry_sync_run_id": 44,
+            }
+        }
         return {
             "repos_seen": 1,
             "skills_seen": 1,

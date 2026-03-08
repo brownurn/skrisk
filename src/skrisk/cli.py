@@ -68,6 +68,8 @@ def sync_registry_command() -> None:
             sitemap_entries=snapshot.sitemap_entries,
             audit_rows=snapshot.audit_rows,
             skill_loader=loader,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
         )
         click.echo(
             f"Synchronized {summary['skills_seen']} skills across {summary['repos_seen']} repos"
@@ -94,6 +96,8 @@ def seed_registry_command() -> None:
         ).seed_registry_snapshot(
             sitemap_entries=snapshot.sitemap_entries,
             audit_rows=snapshot.audit_rows,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
         )
         click.echo(
             "Seeded "
@@ -138,6 +142,14 @@ def scan_due_command(limit_repos: int) -> None:
             )
             for row in tracked_entries
         ]
+        registry_observation_context_by_skill = {
+            (row["publisher"], row["repo"], row["skill_slug"]): {
+                "observed_at": row["weekly_installs_observed_at"],
+                "registry_rank": row["registry_rank"],
+                "registry_sync_run_id": row["registry_sync_run_id"],
+            }
+            for row in tracked_entries
+        }
         loader = GitHubSkillLoader(settings.mirror_root)
         summary = await RegistrySyncService(
             session_factory=session_factory,
@@ -147,6 +159,7 @@ def scan_due_command(limit_repos: int) -> None:
             audit_rows=[],
             skill_loader=loader,
             record_directory_fetch=False,
+            registry_observation_context_by_skill=registry_observation_context_by_skill,
         )
         click.echo(
             f"Scanned {summary['skills_seen']} skills across {summary['repos_seen']} repos "
@@ -246,6 +259,8 @@ def collect_once() -> None:
             sitemap_entries=snapshot.sitemap_entries,
             audit_rows=snapshot.audit_rows,
             skill_loader=loader,
+            total_skills_reported=snapshot.total_skills,
+            pages_fetched=snapshot.pages_fetched,
         )
         click.echo(summary)
 

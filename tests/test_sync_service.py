@@ -226,6 +226,7 @@ async def test_registry_sync_service_can_seed_registry_without_repo_analysis(
 @pytest.mark.asyncio
 async def test_registry_sync_service_uses_cached_install_observation_metadata_for_scan_attribution(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'cached-scan.db'}"
     session_factory = create_sqlite_session_factory(database_url)
@@ -262,14 +263,46 @@ async def test_registry_sync_service_uses_cached_install_observation_metadata_fo
         pages_fetched=3,
         observed_at=cached_observed_at,
     )
+
+    repository = SkillRepository(session_factory)
+    tracked_entries = await repository.list_registry_entries_for_repo_ids([1])
+    assert tracked_entries == [
+        {
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "skill_slug": "agent-tools",
+            "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
+            "weekly_installs": 600,
+            "weekly_installs_observed_at": cached_observed_at,
+            "registry_rank": None,
+            "registry_sync_run_id": 1,
+        }
+    ]
+
+    cached_context_by_skill = {
+        ("tul-sh", "skills", "agent-tools"): {
+            "observed_at": tracked_entries[0]["weekly_installs_observed_at"],
+            "registry_rank": 7,
+            "registry_sync_run_id": tracked_entries[0]["registry_sync_run_id"],
+        }
+    }
+
+    async def fail_if_lookup_used(self, *, skill_id: int):
+        raise AssertionError(f"unexpected registry observation lookup for skill_id={skill_id}")
+
+    monkeypatch.setattr(
+        "skrisk.storage.repository.SkillRepository.get_skill_registry_observation_context",
+        fail_if_lookup_used,
+    )
+
     await service.ingest_registry_snapshot(
         sitemap_entries=sitemap_entries,
         audit_rows=[],
         skill_loader=loader,
         record_directory_fetch=False,
+        registry_observation_context_by_skill=cached_context_by_skill,
     )
 
-    repository = SkillRepository(session_factory)
     async with session_factory() as session:
         skill_id = await session.scalar(select(Skill.id).where(Skill.skill_slug == "agent-tools"))
 
@@ -281,3 +314,4 @@ async def test_registry_sync_service_uses_cached_install_observation_metadata_fo
     ]
     assert observations[1]["observed_at"] == cached_observed_at.isoformat()
     assert observations[1]["registry_sync_run_id"] == observations[0]["registry_sync_run_id"] == 1
+    assert observations[1]["registry_rank"] == 7

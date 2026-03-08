@@ -838,6 +838,11 @@ class SkillRepository:
                     "weekly_installs_observed_at": _coerce_datetime_utc(
                         skill.current_weekly_installs_observed_at
                     ),
+                    "registry_rank": (
+                        skill.current_registry_rank
+                        if skill.current_registry_rank is not None
+                        else repo.registry_rank
+                    ),
                     "registry_sync_run_id": skill.current_registry_sync_run_id,
                 }
                 for skill, repo in result.all()
