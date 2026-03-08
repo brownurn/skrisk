@@ -1024,8 +1024,8 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
         rows.sort(
             key=lambda item: (
                 item["priority_score"],
+                _sort_weekly_installs_value(item["current_weekly_installs"]),
                 item["latest_snapshot"]["risk_report"].get("score", 0),
-                item["current_weekly_installs"] or -1,
                 item["latest_snapshot"]["id"],
             ),
             reverse=True,
@@ -1044,7 +1044,7 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
     if sort == "installs":
         rows.sort(
             key=lambda item: (
-                item["current_weekly_installs"] or -1,
+                _sort_weekly_installs_value(item["current_weekly_installs"]),
                 item["priority_score"],
                 item["latest_snapshot"]["id"],
             ),
@@ -1061,6 +1061,11 @@ def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None
             reverse=True,
         )
         return
+
+
+def _sort_weekly_installs_value(value: int | None) -> int:
+    return -1 if value is None else value
+
 
 def _build_install_telemetry(
     *,
