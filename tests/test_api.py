@@ -111,6 +111,16 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
         summary="Suspicious download URL",
         analyzed_at="2026-03-05T08:31:28.415042+00:00",
     )
+    await repository.record_skill_registry_observation(
+        skill_id=skill_id,
+        registry_sync_run_id=None,
+        repo_snapshot_id=repo_snapshot_id,
+        observed_at=datetime(2026, 3, 7, 12, 0, tzinfo=UTC),
+        weekly_installs=1500,
+        registry_rank=4,
+        observation_kind="scan_attribution",
+        raw_payload={"source": "scan"},
+    )
 
     app = create_app(session_factory)
 
@@ -148,10 +158,11 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
     assert detail["weekly_installs_delta"] == 500
     assert detail["impact_score"] == 60
     assert detail["priority_score"] == 94
-    assert [row["weekly_installs"] for row in detail["install_history"]] == [1000, 1500]
+    assert [row["weekly_installs"] for row in detail["install_history"]] == [1000, 1500, 1500]
     assert [row["observation_kind"] for row in detail["install_history"]] == [
         "directory_fetch",
         "directory_fetch",
+        "scan_attribution",
     ]
     assert detail["latest_snapshot"]["risk_report"]["severity"] == "high"
     assert detail["external_verdicts"][0]["partner"] == "snyk"

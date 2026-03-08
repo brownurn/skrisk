@@ -1137,7 +1137,7 @@ def _serialize_install_history(
             "observation_kind": row.observation_kind,
             "raw_payload": row.raw_payload,
         }
-        for row in _select_metric_observations(observations)
+        for row in observations
     ]
 
 
