@@ -43,6 +43,13 @@
 	let installBucketFilter = $state<InstallBucket>('all');
 	let sortMode = $state<SortMode>('priority');
 
+	const totalWeeklyInstalls = $derived(
+		data.skills.reduce(
+			(total: number, skill: SkillSummary) => total + (skill.currentWeeklyInstalls ?? 0),
+			0
+		)
+	);
+
 	function matchesInstallBucket(weeklyInstalls: number | null, bucket: InstallBucket): boolean {
 		if (bucket === 'all') {
 			return true;
@@ -132,6 +139,10 @@
 			<div class="kpi-line">
 				<span class="muted">Tracked skills</span>
 				<strong>{data.skills.length}</strong>
+			</div>
+			<div class="kpi-line">
+				<span class="muted">Total weekly installs</span>
+				<strong>{formatWeeklyInstalls(totalWeeklyInstalls)}</strong>
 			</div>
 			<div class="kpi-line">
 				<span class="muted">Priority 80+</span>

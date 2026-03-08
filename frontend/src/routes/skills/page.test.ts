@@ -44,7 +44,7 @@ test('renders weekly installs and priority columns in priority order', () => {
 					repo: 'skill-pack',
 					skillSlug: 'network-probe',
 					title: 'Network Probe',
-					currentWeeklyInstalls: 24,
+					currentWeeklyInstalls: 999,
 					currentWeeklyInstallsObservedAt: '2026-03-07T08:00:00+00:00',
 					peakWeeklyInstalls: 100,
 					weeklyInstallsDelta: -10,
@@ -75,6 +75,8 @@ test('renders weekly installs and priority columns in priority order', () => {
 	});
 
 	expect(screen.getByRole('heading', { name: 'Skills registry' })).toBeInTheDocument();
+	expect(screen.getByText('Total weekly installs')).toBeInTheDocument();
+	expect(screen.getByText('13.0k')).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /weekly installs/i })).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /priority/i })).toBeInTheDocument();
 	expect(screen.getByText('12.0k')).toBeInTheDocument();
