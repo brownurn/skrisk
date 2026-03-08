@@ -13,6 +13,7 @@
 	let { data } = $props<{ data: { skills: SkillSummary[] } }>();
 
 	type InstallBucket = 'all' | '0-9' | '10-99' | '100-999' | '1k-9.9k' | '10k+';
+	type SortMode = 'priority' | 'installs';
 
 	const severityOptions: Array<{ label: string; value: SeverityLevel | 'all' }> = [
 		{ label: 'All severities', value: 'all' },
@@ -32,9 +33,15 @@
 		{ label: '10k+ weekly installs', value: '10k+' }
 	];
 
+	const sortOptions: Array<{ label: string; value: SortMode }> = [
+		{ label: 'Priority', value: 'priority' },
+		{ label: 'Weekly installs', value: 'installs' }
+	];
+
 	let query = $state('');
 	let severityFilter = $state<SeverityLevel | 'all'>('all');
 	let installBucketFilter = $state<InstallBucket>('all');
+	let sortMode = $state<SortMode>('priority');
 
 	function matchesInstallBucket(weeklyInstalls: number | null, bucket: InstallBucket): boolean {
 		if (bucket === 'all') {
@@ -92,6 +99,20 @@
 					.toLowerCase();
 
 				return haystack.includes(normalizedQuery);
+			})
+			.sort((left, right) => {
+				if (sortMode === 'installs') {
+					return (
+						(right.currentWeeklyInstalls ?? -1) - (left.currentWeeklyInstalls ?? -1) ||
+						right.priorityScore - left.priorityScore
+					);
+				}
+
+				return (
+					right.priorityScore - left.priorityScore ||
+					(right.currentWeeklyInstalls ?? -1) - (left.currentWeeklyInstalls ?? -1) ||
+					right.latestSnapshot.riskReport.score - left.latestSnapshot.riskReport.score
+				);
 			});
 	});
 </script>
@@ -142,6 +163,7 @@
 			<input
 				id="skills-query"
 				name="skills-query"
+				aria-label="Search skills"
 				type="search"
 				bind:value={query}
 				placeholder="publisher / repo / domain / category"
@@ -149,7 +171,12 @@
 		</div>
 		<div class="field">
 			<label for="skills-severity">Severity</label>
-			<select id="skills-severity" name="skills-severity" bind:value={severityFilter}>
+			<select
+				id="skills-severity"
+				name="skills-severity"
+				aria-label="Severity"
+				bind:value={severityFilter}
+			>
 				{#each severityOptions as option}
 					<option value={option.value}>{option.label}</option>
 				{/each}
@@ -157,8 +184,21 @@
 		</div>
 		<div class="field">
 			<label for="skills-installs">Weekly installs</label>
-			<select id="skills-installs" name="skills-installs" bind:value={installBucketFilter}>
+			<select
+				id="skills-installs"
+				name="skills-installs"
+				aria-label="Weekly installs"
+				bind:value={installBucketFilter}
+			>
 				{#each installBucketOptions as option}
+					<option value={option.value}>{option.label}</option>
+				{/each}
+			</select>
+		</div>
+		<div class="field">
+			<label for="skills-sort">Sort by</label>
+			<select id="skills-sort" name="skills-sort" aria-label="Sort by" bind:value={sortMode}>
+				{#each sortOptions as option}
 					<option value={option.value}>{option.label}</option>
 				{/each}
 			</select>
