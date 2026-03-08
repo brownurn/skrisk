@@ -17,7 +17,12 @@ from skrisk.collectors.github import (
     load_skill_files,
     mirror_repo_snapshot,
 )
-from skrisk.collectors.skills_sh import AuditRow, SkillSitemapEntry, extract_audit_rows, parse_sitemap
+from skrisk.collectors.skills_sh import (
+    AuditRow,
+    SkillSitemapEntry,
+    extract_audit_rows,
+    parse_directory_page,
+)
 from skrisk.storage.repository import SkillRepository
 
 
@@ -28,6 +33,7 @@ SkillLoader = Callable[[SkillSitemapEntry], Awaitable[tuple[str, dict[str, str]]
 class RegistrySnapshot:
     sitemap_entries: list[SkillSitemapEntry]
     audit_rows: list[AuditRow]
+    total_skills: int | None = None
 
 
 class SkillsShClient:
@@ -41,13 +47,34 @@ class SkillsShClient:
             async with httpx.AsyncClient(timeout=30.0) as managed_client:
                 return await self.fetch_snapshot(managed_client)
 
-        sitemap_response = await client.get(f"{self._base_url}/sitemap.xml")
-        sitemap_response.raise_for_status()
         audits_response = await client.get(f"{self._base_url}/audits")
         audits_response.raise_for_status()
+        entries: list[SkillSitemapEntry] = []
+        seen: set[tuple[str, str, str]] = set()
+        page = 0
+        total_skills = 0
+
+        while True:
+            directory_response = await client.get(f"{self._base_url}/api/skills/all-time/{page}")
+            directory_response.raise_for_status()
+            directory_page = parse_directory_page(directory_response.json(), base_url=self._base_url)
+            total_skills = directory_page.total
+
+            for entry in directory_page.entries:
+                key = (entry.publisher, entry.repo, entry.skill_slug)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append(entry)
+
+            if not directory_page.has_more:
+                break
+            page += 1
+
         return RegistrySnapshot(
-            sitemap_entries=parse_sitemap(sitemap_response.text),
+            sitemap_entries=entries,
             audit_rows=extract_audit_rows(audits_response.text),
+            total_skills=total_skills,
         )
 
 

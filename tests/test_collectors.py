@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from skrisk.collectors.github import discover_skills_in_checkout
-from skrisk.collectors.skills_sh import extract_audit_rows, parse_sitemap
+from skrisk.collectors.skills_sh import extract_audit_rows, parse_directory_page, parse_sitemap
 
 
 def test_parse_sitemap_extracts_skill_coordinates() -> None:
@@ -91,3 +91,105 @@ def test_discover_skills_in_checkout_finds_supported_skill_locations(
     assert discovered[0].relative_path == "skills/.system/skill-a"
     assert discovered[1].relative_path == ".agents/skills/skill-b"
 
+
+def test_parse_directory_page_extracts_registry_entries() -> None:
+    payload = {
+        "page": 0,
+        "total": 2,
+        "hasMore": False,
+        "skills": [
+            {
+                "source": "tul-sh/skills",
+                "skillId": "agent-tools",
+                "installs": 1234,
+            },
+            {
+                "source": "vercel-labs/skills",
+                "skillId": "find-skills",
+            },
+        ],
+    }
+
+    page = parse_directory_page(payload)
+
+    assert page.total == 2
+    assert page.has_more is False
+    assert len(page.entries) == 2
+    assert page.entries[0].publisher == "tul-sh"
+    assert page.entries[0].repo == "skills"
+    assert page.entries[0].skill_slug == "agent-tools"
+    assert page.entries[0].url == "https://skills.sh/tul-sh/skills/agent-tools"
+    assert page.entries[0].weekly_installs == 1234
+    assert page.entries[1].weekly_installs is None
+
+
+async def test_skills_sh_client_fetch_snapshot_pages_through_directory_api() -> None:
+    import httpx
+
+    from skrisk.services.sync import SkillsShClient
+
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/skills/all-time/0":
+            return httpx.Response(
+                200,
+                json={
+                    "page": 0,
+                    "total": 3,
+                    "hasMore": True,
+                    "skills": [
+                        {
+                            "source": "tul-sh/skills",
+                            "skillId": "agent-tools",
+                            "installs": 100,
+                        },
+                        {
+                            "source": "vercel-labs/skills",
+                            "skillId": "find-skills",
+                            "installs": 90,
+                        },
+                    ],
+                },
+            )
+        if request.url.path == "/api/skills/all-time/1":
+            return httpx.Response(
+                200,
+                json={
+                    "page": 1,
+                    "total": 3,
+                    "hasMore": False,
+                    "skills": [
+                        {
+                            "source": "melurna/skills",
+                            "skillId": "impact-analyzer",
+                            "installs": 80,
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/audits":
+            return httpx.Response(200, text="<html><body>no audits rows</body></html>")
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://skills.sh") as client:
+        snapshot = await SkillsShClient("https://skills.sh").fetch_snapshot(client)
+
+    assert requested_paths[0] in {"/api/skills/all-time/0", "/audits"}
+    assert set(requested_paths) == {
+        "/api/skills/all-time/0",
+        "/api/skills/all-time/1",
+        "/audits",
+    }
+    assert snapshot.total_skills == 3
+    assert [entry.skill_slug for entry in snapshot.sitemap_entries] == [
+        "agent-tools",
+        "find-skills",
+        "impact-analyzer",
+    ]
+    assert snapshot.sitemap_entries[0].weekly_installs == 100
+    assert snapshot.sitemap_entries[1].weekly_installs == 90
+    assert snapshot.sitemap_entries[2].weekly_installs == 80
