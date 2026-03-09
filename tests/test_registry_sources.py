@@ -173,3 +173,68 @@ async def test_skill_source_entry_prefers_source_native_id_and_preserves_first_l
             "raw_payload": {"source": "skillsmp", "version": 2},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_skill_source_entry_upgrades_existing_url_row_when_native_id_arrives(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'registry-source-upgrade.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="example",
+        repo="skills",
+        source_url="https://github.com/example/skills",
+        registry_rank=4,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="agent-tools",
+        title="agent-tools",
+        relative_path="skills/agent-tools",
+        registry_url="https://skills.sh/example/skills/agent-tools",
+    )
+    source_id = await repository.upsert_registry_source(
+        name="skillsmp",
+        base_url="https://skillsmp.com",
+    )
+    observed_at = datetime(2026, 3, 8, 20, 45, tzinfo=UTC)
+    source_url = "https://skillsmp.com/skills/example-agent-tools"
+
+    first_entry_id = await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=source_id,
+        source_url=source_url,
+        source_native_id=None,
+        weekly_installs=40,
+        registry_rank=None,
+        observed_at=observed_at,
+        raw_payload={"stage": "discovery"},
+    )
+    second_entry_id = await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=source_id,
+        source_url=source_url,
+        source_native_id="example-agent-tools",
+        weekly_installs=45,
+        registry_rank=2,
+        observed_at=observed_at,
+        raw_payload={"stage": "api"},
+    )
+
+    detail = await repository.get_skill_detail(
+        publisher="example",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
+
+    assert detail is not None
+    assert first_entry_id == second_entry_id
+    assert detail["source_count"] == 1
+    assert detail["current_total_installs"] == 45
+    assert detail["source_entries"][0]["source_native_id"] == "example-agent-tools"
+    assert detail["source_entries"][0]["registry_rank"] == 2
+    assert detail["source_entries"][0]["raw_payload"] == {"stage": "api"}

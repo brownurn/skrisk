@@ -122,19 +122,24 @@ class SkillRepository:
     ) -> int:
         observed_at = _coerce_datetime_utc(observed_at) or datetime.now(UTC)
         async with self._session_factory() as session:
-            query = select(SkillSourceEntry).where(
+            base_query = select(SkillSourceEntry).where(
                 SkillSourceEntry.skill_id == skill_id,
                 SkillSourceEntry.registry_source_id == registry_source_id,
             )
             if source_native_id is not None:
-                query = query.where(SkillSourceEntry.source_native_id == source_native_id)
+                query = base_query.where(SkillSourceEntry.source_native_id == source_native_id)
             else:
-                query = query.where(
+                query = base_query.where(
                     SkillSourceEntry.source_native_id.is_(None),
                     SkillSourceEntry.source_url == source_url,
                 )
             result = await session.execute(query)
             row = result.scalar_one_or_none()
+            if row is None and source_native_id is not None:
+                fallback_result = await session.execute(
+                    base_query.where(SkillSourceEntry.source_url == source_url)
+                )
+                row = fallback_result.scalar_one_or_none()
             if row is None:
                 row = SkillSourceEntry(
                     skill_id=skill_id,
