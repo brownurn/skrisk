@@ -963,19 +963,26 @@ class SkillRepository:
             new_link_count = func.sum(
                 case((SkillIndicatorLink.is_new_in_snapshot.is_(True), 1), else_=0)
             )
+            max_risk_score = func.max(
+                cast(func.json_extract(SkillSnapshot.risk_report, "$.score"), Integer)
+            )
             result = await session.execute(
                 select(
                     Indicator,
                     link_count.label("link_count"),
                     observation_count.label("observation_count"),
                     new_link_count.label("new_link_count"),
+                    max_risk_score.label("max_risk_score"),
                 )
                 .outerjoin(SkillIndicatorLink, SkillIndicatorLink.indicator_id == Indicator.id)
+                .outerjoin(SkillSnapshot, SkillSnapshot.id == SkillIndicatorLink.skill_snapshot_id)
                 .outerjoin(IndicatorObservation, IndicatorObservation.indicator_id == Indicator.id)
                 .where(Indicator.indicator_type.in_(("domain", "ip")))
                 .group_by(Indicator.id)
+                .having(link_count > 0)
                 .order_by(
                     observation_count.desc(),
+                    max_risk_score.desc().nulls_last(),
                     new_link_count.desc().nulls_last(),
                     link_count.desc(),
                     Indicator.id.asc(),
@@ -998,7 +1005,13 @@ class SkillRepository:
                     completed_providers_by_indicator[enrichment.indicator_id].add(enrichment.provider)
 
             candidates: list[dict[str, Any]] = []
-            for indicator, linked_skill_count, matched_observation_count, new_indicator_count in indicator_rows:
+            for (
+                indicator,
+                linked_skill_count,
+                matched_observation_count,
+                new_indicator_count,
+                max_indicator_risk_score,
+            ) in indicator_rows:
                 if _is_low_signal_infrastructure_indicator(
                     indicator_type=indicator.indicator_type,
                     indicator_value=indicator.indicator_value,
@@ -1021,6 +1034,7 @@ class SkillRepository:
                         "linked_skill_count": int(linked_skill_count or 0),
                         "matched_observation_count": int(matched_observation_count or 0),
                         "new_indicator_count": int(new_indicator_count or 0),
+                        "max_risk_score": int(max_indicator_risk_score or 0),
                     }
                 )
                 if len(candidates) >= limit:
