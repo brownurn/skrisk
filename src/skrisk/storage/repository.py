@@ -852,13 +852,17 @@ class SkillRepository:
                     snapshot_row=snapshot_row,
                     observations=observations_by_skill.get(skill_row.id, []),
                 )
-                source_entries = source_entries_by_skill.get(skill_row.id, [])
+                source_entries = _resolved_source_entries(
+                    skill_row=skill_row,
+                    source_entries=source_entries_by_skill.get(skill_row.id, []),
+                )
                 items.append(
                     {
                         "publisher": repo_row.publisher,
                         "repo": repo_row.repo,
                         "skill_slug": skill_row.skill_slug,
                         "title": skill_row.title,
+                        "registry_url": skill_row.registry_url,
                         "current_weekly_installs": telemetry["current_weekly_installs"],
                         "current_weekly_installs_observed_at": telemetry[
                             "current_weekly_installs_observed_at"
@@ -1478,6 +1482,10 @@ class SkillRepository:
                 _serialize_source_entry(source_entry, registry_source, registry_sync_run)
                 for source_entry, registry_source, registry_sync_run in source_entry_result.all()
             ]
+            source_entries = _resolved_source_entries(
+                skill_row=skill_row,
+                source_entries=source_entries,
+            )
             telemetry = _build_install_telemetry(
                 skill_row=skill_row,
                 snapshot_row=latest_snapshot,
@@ -1920,6 +1928,50 @@ def _build_install_breakdown(source_entries: list[dict[str, Any]]) -> list[dict[
         }
         for entry in source_entries
     ]
+
+
+def _resolved_source_entries(
+    *,
+    skill_row: Skill,
+    source_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if source_entries:
+        return source_entries
+
+    inferred_source = _registry_source_from_url(skill_row.registry_url)
+    if inferred_source is None:
+        return []
+
+    return [
+        {
+            "id": 0,
+            "registry_source_id": 0,
+            "source_name": inferred_source,
+            "source_base_url": _registry_source_base_url(inferred_source),
+            "source_url": skill_row.registry_url,
+            "source_native_id": None,
+            "current_registry_sync_run_id": skill_row.current_registry_sync_run_id,
+            "current_registry_sync_observed_at": _isoformat_datetime(
+                _coerce_datetime_utc(skill_row.current_weekly_installs_observed_at)
+            ),
+            "view": "all-time",
+            "weekly_installs": skill_row.current_weekly_installs,
+            "registry_rank": skill_row.current_registry_rank,
+            "first_seen_at": None,
+            "last_seen_at": _isoformat_datetime(
+                _coerce_datetime_utc(skill_row.current_weekly_installs_observed_at)
+            ),
+            "raw_payload": {"source": inferred_source, "derived": True},
+        }
+    ]
+
+
+def _registry_source_base_url(source: str | None) -> str:
+    if source == "skills.sh":
+        return "https://skills.sh"
+    if source == "skillsmp":
+        return "https://skillsmp.com"
+    return ""
 
 
 _LOW_SIGNAL_HOSTS = {

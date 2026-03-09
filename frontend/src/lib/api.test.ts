@@ -246,3 +246,60 @@ test('loadSkillDetail normalizes install history rows', async () => {
 		}
 	]);
 });
+
+test('loadSkillsPage infers registry provenance when the list payload omits sources', async () => {
+	const fetcher = (async () => {
+		return new Response(
+			JSON.stringify({
+				items: [
+					{
+						publisher: 'melurna',
+						repo: 'skill-pack',
+						skill_slug: 'seed-only',
+						title: 'Seed Only',
+						registry_url: 'https://skills.sh/melurna/skill-pack/seed-only',
+						current_weekly_installs: 42,
+						current_weekly_installs_observed_at: '2026-03-07T08:00:00+00:00',
+						current_total_installs: 42,
+						current_total_installs_observed_at: '2026-03-07T08:00:00+00:00',
+						peak_weekly_installs: 42,
+						weekly_installs_delta: null,
+						impact_score: 15,
+						priority_score: 0,
+						source_count: 0,
+						sources: [],
+						install_breakdown: [],
+						latest_snapshot: null
+					}
+				],
+				total: 1,
+				page: 1,
+				page_size: 100,
+				has_next: false,
+				has_previous: false
+			}),
+			{
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			}
+		);
+	}) as typeof fetch;
+
+	const page = await loadSkillsPage(fetcher, {
+		page: 1,
+		pageSize: 100,
+		sort: 'priority'
+	});
+
+	expect(page.items[0].registryUrl).toBe('https://skills.sh/melurna/skill-pack/seed-only');
+	expect(page.items[0].sources).toEqual(['skills.sh']);
+	expect(page.items[0].sourceCount).toBe(1);
+	expect(page.items[0].installBreakdown).toEqual([
+		{
+			sourceName: 'skills.sh',
+			weeklyInstalls: 42,
+			sourceUrl: 'https://skills.sh/melurna/skill-pack/seed-only',
+			registryRank: null
+		}
+	]);
+});

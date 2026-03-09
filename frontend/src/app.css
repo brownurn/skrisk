@@ -387,6 +387,14 @@ td code,
 	color: var(--muted);
 }
 
+.table-help {
+	display: inline-flex;
+	align-items: center;
+	border-bottom: 1px dotted rgba(16, 36, 58, 0.45);
+	cursor: help;
+	text-underline-offset: 0.18em;
+}
+
 .field {
 	display: grid;
 	gap: 6px;

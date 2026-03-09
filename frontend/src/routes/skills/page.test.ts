@@ -5,12 +5,18 @@ import { expect, test } from 'vitest';
 import type { SkillSummary } from '$lib/types';
 import SkillsPage from './+page.svelte';
 
-function buildSkill(skillSlug: string, priorityScore: number, installs: number): SkillSummary {
+function buildSkill(
+	skillSlug: string,
+	priorityScore: number,
+	installs: number,
+	overrides: Partial<SkillSummary> = {}
+): SkillSummary {
 	return {
 		publisher: 'tul-sh',
 		repo: 'skills',
 		skillSlug,
 		title: skillSlug,
+		registryUrl: `https://skills.sh/tul-sh/skills/${skillSlug}`,
 		currentWeeklyInstalls: installs,
 		currentWeeklyInstallsObservedAt: '2026-03-07T08:00:00+00:00',
 		currentTotalInstalls: installs,
@@ -53,7 +59,8 @@ function buildSkill(skillSlug: string, priorityScore: number, installs: number):
 				findings: [],
 				indicatorMatches: [{ indicatorType: 'domain', indicatorValue: 'drop.example', observations: [] }]
 			}
-		}
+		},
+		...overrides
 	};
 }
 
@@ -91,6 +98,39 @@ test('renders the server-provided page of skills with weekly installs', () => {
 
 	const rows = within(container).getAllByRole('row');
 	expect(within(rows[1]).getByRole('link', { name: 'tul-sh/skills/agent-tools' })).toBeInTheDocument();
+});
+
+test('explains analyst columns and falls back to inferred registries when explicit sources are missing', () => {
+	render(SkillsPage, {
+		data: {
+			page: {
+				items: [
+					buildSkill('seed-only', 0, 42, {
+						sourceCount: 0,
+						sources: [],
+						installBreakdown: [],
+						registryUrl: 'https://skills.sh/melurna/skill-pack/seed-only'
+					})
+				],
+				total: 1,
+				page: 1,
+				pageSize: 100,
+				hasNext: false,
+				hasPrevious: false
+			},
+			filters: {
+				query: '',
+				severity: 'all',
+				installBucket: 'all',
+				sort: 'priority'
+			}
+		}
+	});
+
+	expect(screen.getAllByTitle(/B = behavior score/i).length).toBeGreaterThan(0);
+	expect(screen.getAllByTitle(/Priority combines the latest risk score/i).length).toBeGreaterThan(0);
+	expect(screen.getAllByTitle(/Top domain shows the first extracted domain/i).length).toBeGreaterThan(0);
+	expect(screen.getAllByText('skills.sh').length).toBeGreaterThan(0);
 });
 
 test('renders pagination links that preserve filter state', () => {

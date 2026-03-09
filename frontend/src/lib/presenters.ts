@@ -43,6 +43,37 @@ export function buildIndicatorHref(indicatorType: string, indicatorValue: string
 	return `/indicators/${indicatorType}/${encodeURIComponent(indicatorValue)}`;
 }
 
+export function inferRegistrySource(url: string | null | undefined): string | null {
+	if (!url) {
+		return null;
+	}
+
+	const lowered = url.toLowerCase();
+	if (lowered.includes('skills.sh')) {
+		return 'skills.sh';
+	}
+	if (lowered.includes('skillsmp.com')) {
+		return 'skillsmp';
+	}
+	return null;
+}
+
+export function registryLabels(skill: Pick<SkillSummary, 'sources' | 'installBreakdown' | 'registryUrl'>): string[] {
+	if (skill.sources.length > 0) {
+		return skill.sources;
+	}
+
+	const fromBreakdown = skill.installBreakdown
+		.map((entry) => entry.sourceName)
+		.filter((value, index, entries) => value.length > 0 && entries.indexOf(value) === index);
+	if (fromBreakdown.length > 0) {
+		return fromBreakdown;
+	}
+
+	const inferred = inferRegistrySource(skill.registryUrl);
+	return inferred ? [inferred] : [];
+}
+
 export function firstDomain(domains: string[]): string {
 	return domains[0] ?? 'No domain extracted';
 }

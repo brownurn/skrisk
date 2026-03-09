@@ -6,6 +6,7 @@
 		formatWeeklyInstalls,
 		installTrendLabel,
 		priorityTone,
+		registryLabels,
 		severityTone
 	} from '$lib/presenters';
 	import type { SkillSummary, SkillsPageFilters } from '$lib/types';
@@ -65,6 +66,12 @@
 	const pageEnd = $derived.by(() =>
 		data.page.total === 0 ? 0 : pageStart + data.page.items.length - 1
 	);
+	const signalTooltip =
+		'Signals are the SK Risk sub-scores: B = behavior score from the skill itself, I = external intelligence corroboration, and C = change score from version-to-version drift.';
+	const priorityTooltip =
+		'Priority combines the latest risk score, confidence, and install impact to rank which skills analysts should review first.';
+	const topDomainTooltip =
+		'Top domain shows the first extracted domain from the latest snapshot. It is a representative domain, not the most-contacted or most-frequent domain.';
 
 	function buildPageHref(pageNumber: number): string {
 		const params = new URLSearchParams();
@@ -183,13 +190,19 @@
 					<tr>
 						<th>Skill</th>
 						<th>Registries</th>
-						<th>Priority</th>
+						<th>
+							<span class="table-help" title={priorityTooltip}>Priority</span>
+						</th>
 						<th>Total Installs</th>
 						<th>Severity</th>
 						<th>Confidence</th>
-						<th>Signals</th>
+						<th>
+							<span class="table-help" title={signalTooltip}>Signals</span>
+						</th>
 						<th>Indicators</th>
-						<th>Top domain</th>
+						<th>
+							<span class="table-help" title={topDomainTooltip}>Top domain</span>
+						</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -202,11 +215,15 @@
 								<p class="table-subtext">{skill.title}</p>
 							</td>
 							<td>
-								<div class="token-list">
-									{#each skill.sources as source}
-										<span class="token">{source}</span>
-									{/each}
-								</div>
+								{#if registryLabels(skill).length > 0}
+									<div class="token-list">
+										{#each registryLabels(skill) as source}
+											<span class="token">{source}</span>
+										{/each}
+									</div>
+								{:else}
+									<span class="table-subtext">Unknown</span>
+								{/if}
 							</td>
 							<td>
 								<span class="badge" data-level={priorityTone(skill.priorityScore)}>
@@ -242,8 +259,8 @@
 							</td>
 							<td>{skill.latestSnapshot.riskReport.confidence ?? 'unscored'}</td>
 							<td class="mono">
-								b {skill.latestSnapshot.riskReport.behaviorScore ?? 0} / i {skill.latestSnapshot.riskReport.intelScore ?? 0}
-								/ c {skill.latestSnapshot.riskReport.changeScore ?? 0}
+								B {skill.latestSnapshot.riskReport.behaviorScore ?? 0} / I {skill.latestSnapshot.riskReport.intelScore ?? 0}
+								/ C {skill.latestSnapshot.riskReport.changeScore ?? 0}
 							</td>
 							<td>{skill.latestSnapshot.riskReport.indicatorMatches.length}</td>
 							<td class="mono">{firstDomain(skill.latestSnapshot.extractedDomains)}</td>

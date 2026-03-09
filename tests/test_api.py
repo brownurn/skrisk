@@ -140,6 +140,7 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
     assert list_response.status_code == 200
     list_payload = list_response.json()
     assert len(list_payload) == 1
+    assert list_payload[0]["registry_url"] == "https://skills.sh/tul-sh/skills/agent-tools"
     assert list_payload[0]["current_weekly_installs"] == 1500
     assert list_payload[0]["current_weekly_installs_observed_at"] == "2026-03-07T08:00:00+00:00"
     assert list_payload[0]["peak_weekly_installs"] == 1500
@@ -258,6 +259,7 @@ async def test_api_exposes_multi_registry_sources_and_install_breakdown(tmp_path
         "skills.sh",
         "skillsmp",
     ]
+    assert list_payload[0]["registry_url"] == "https://skills.sh/openclaw/openclaw/prose"
 
     assert detail_response.status_code == 200
     detail = detail_response.json()

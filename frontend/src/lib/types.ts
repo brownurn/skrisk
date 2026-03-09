@@ -101,6 +101,7 @@ export interface SkillSummary {
 	repo: string;
 	skillSlug: string;
 	title: string;
+	registryUrl?: string | null;
 	currentWeeklyInstalls: number | null;
 	currentWeeklyInstallsObservedAt: string | null;
 	currentTotalInstalls: number | null;

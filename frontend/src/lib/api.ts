@@ -56,6 +56,21 @@ function normalizeMaybeNumber(value: unknown): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+function inferRegistrySource(url: string | null | undefined): string | null {
+	if (!url) {
+		return null;
+	}
+
+	const lowered = url.toLowerCase();
+	if (lowered.includes('skills.sh')) {
+		return 'skills.sh';
+	}
+	if (lowered.includes('skillsmp.com')) {
+		return 'skillsmp';
+	}
+	return null;
+}
+
 function normalizeStats(raw: Record<string, number>, pendingVtQueue: number): DashboardStats {
 	return {
 		trackedRepos: raw.tracked_repos ?? 0,
@@ -147,12 +162,28 @@ function normalizeSnapshot(raw?: Record<string, unknown> | null): SkillSnapshot 
 }
 
 function normalizeSkillSummary(raw: Record<string, unknown>): SkillSummary {
+	const registryUrl = raw.registry_url ? String(raw.registry_url) : null;
+	const currentWeeklyInstalls = normalizeMaybeNumber(raw.current_weekly_installs);
+	const rawInstallBreakdown = Array.isArray(raw.install_breakdown)
+		? raw.install_breakdown.map((item) => normalizeInstallBreakdown(item as Record<string, unknown>))
+		: [];
+	const installBreakdown =
+		rawInstallBreakdown.length > 0
+			? rawInstallBreakdown
+			: buildFallbackInstallBreakdown(registryUrl, currentWeeklyInstalls);
+	const sources =
+		Array.isArray(raw.sources) && raw.sources.length > 0
+			? raw.sources.map(String)
+			: installBreakdown.map((item) => item.sourceName);
+	const normalizedSourceCount = Number(raw.source_count ?? 0);
+
 	return {
 		publisher: String(raw.publisher ?? ''),
 		repo: String(raw.repo ?? ''),
 		skillSlug: String(raw.skill_slug ?? ''),
 		title: String(raw.title ?? ''),
-		currentWeeklyInstalls: normalizeMaybeNumber(raw.current_weekly_installs),
+		registryUrl,
+		currentWeeklyInstalls,
 		currentWeeklyInstallsObservedAt: raw.current_weekly_installs_observed_at
 			? String(raw.current_weekly_installs_observed_at)
 			: null,
@@ -164,11 +195,9 @@ function normalizeSkillSummary(raw: Record<string, unknown>): SkillSummary {
 		weeklyInstallsDelta: normalizeMaybeNumber(raw.weekly_installs_delta),
 		impactScore: Number(raw.impact_score ?? 0),
 		priorityScore: Number(raw.priority_score ?? 0),
-		sourceCount: Number(raw.source_count ?? 0),
-		sources: Array.isArray(raw.sources) ? raw.sources.map(String) : [],
-		installBreakdown: Array.isArray(raw.install_breakdown)
-			? raw.install_breakdown.map((item) => normalizeInstallBreakdown(item as Record<string, unknown>))
-			: [],
+		sourceCount: normalizedSourceCount > 0 ? normalizedSourceCount : sources.length,
+		sources,
+		installBreakdown,
 		latestSnapshot: normalizeSnapshot(raw.latest_snapshot as Record<string, unknown>)
 	};
 }
@@ -212,6 +241,25 @@ function normalizeInstallBreakdown(raw: Record<string, unknown>): SourceInstallB
 		sourceUrl: String(raw.source_url ?? ''),
 		registryRank: normalizeMaybeNumber(raw.registry_rank)
 	};
+}
+
+function buildFallbackInstallBreakdown(
+	registryUrl: string | null,
+	currentWeeklyInstalls: number | null
+): SourceInstallBreakdown[] {
+	const sourceName = inferRegistrySource(registryUrl);
+	if (!registryUrl || !sourceName) {
+		return [];
+	}
+
+	return [
+		{
+			sourceName,
+			weeklyInstalls: currentWeeklyInstalls,
+			sourceUrl: registryUrl,
+			registryRank: null
+		}
+	];
 }
 
 function normalizeSourceEntry(raw: Record<string, unknown>): SkillSourceEntry {
