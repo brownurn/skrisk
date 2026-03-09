@@ -13,6 +13,7 @@ from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
 from skrisk.services.intel_sync import AbuseChSyncService
+from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySnapshot, RegistrySyncService, SkillsShClient
 from skrisk.services.vt_triage import VTTriageService
 from skrisk.storage.database import create_sqlite_session_factory, init_db
@@ -199,6 +200,41 @@ def scan_due_command(limit_repos: int) -> None:
         click.echo(
             f"Scanned {summary['skills_seen']} skills across {summary['repos_seen']} repos "
             f"from {len(due_repos)} due repos"
+        )
+
+    from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("sync-skillsmp-discovery")
+@click.argument("urls", nargs=-1)
+def sync_skillsmp_discovery_command(urls: tuple[str, ...]) -> None:
+    """Discover skillsmp detail pages from category/detail URLs and seed them."""
+
+    if not urls:
+        raise click.ClickException("Provide at least one skillsmp category or detail URL")
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.archive_root.mkdir(parents=True, exist_ok=True)
+
+        discovery = await SkillsMpDiscoveryService(settings=settings).discover_from_urls(list(urls))
+        summary = await RegistrySyncService(
+            session_factory=session_factory,
+            analyzer=SkillAnalyzer(),
+        ).seed_registry_snapshot(
+            sitemap_entries=discovery.entries,
+            audit_rows=[],
+            total_skills_reported=len(discovery.entries),
+            pages_fetched=len(discovery.archived_pages),
+        )
+        click.echo(
+            f"Discovered {len(discovery.entries)} skills from {len(discovery.archived_pages)} archived pages; "
+            f"seeded {summary['skills_seeded']} skills across {summary['repos_seeded']} repos"
         )
 
     from skrisk.analysis.analyzer import SkillAnalyzer
