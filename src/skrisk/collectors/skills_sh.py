@@ -25,6 +25,11 @@ class SkillSitemapEntry:
     source: str = "skills.sh"
     source_native_id: str | None = None
     view: str = "all-time"
+    repo_url: str | None = None
+    author: str | None = None
+    description: str | None = None
+    stars: int | None = None
+    updated_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

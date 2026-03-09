@@ -6,6 +6,7 @@ from click.testing import CliRunner
 
 from skrisk.cli import cli
 from skrisk.collectors.skills_sh import SkillSitemapEntry
+from skrisk.collectors.skillsmp import SkillsMpSearchPage
 from skrisk.services.sync import RegistrySnapshot
 
 
@@ -221,6 +222,90 @@ def test_sync_registry_cli_passes_snapshot_metadata_to_ingest_service(
         "Discovered 1 unique skills from 500 reported rows; synchronized 1 skills across 1 repos"
         in result.output
     )
+
+
+def test_seed_registry_cli_supports_skillsmp_search_source(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKILLSMP_API_KEY", "test-key")
+
+    async def fake_fetch_search_page(self, query, *, page=1, client=None):
+        assert query == "security"
+        assert page == 3
+        return SkillsMpSearchPage(
+            query=query,
+            page=page,
+            page_size=20,
+            total=21,
+            total_pages=2,
+            has_next=False,
+            has_prev=True,
+            total_is_exact=False,
+            entries=[
+                SkillSitemapEntry(
+                    publisher="openclaw",
+                    repo="openclaw",
+                    skill_slug="prose",
+                    url="https://skillsmp.com/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+                    source="skillsmp",
+                    source_native_id="openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+                    repo_url="https://github.com/openclaw/openclaw/tree/main/extensions/open-prose/skills/prose",
+                    author="openclaw",
+                    description="Open prose skill",
+                    stars=42,
+                    updated_at="1772794212",
+                )
+            ],
+        )
+
+    async def fake_seed_registry_snapshot(
+        self,
+        *,
+        sitemap_entries,
+        audit_rows,
+        total_skills_reported=None,
+        pages_fetched=None,
+        observed_at=None,
+    ):
+        assert len(sitemap_entries) == 1
+        assert sitemap_entries[0].source == "skillsmp"
+        assert sitemap_entries[0].repo_url == "https://github.com/openclaw/openclaw/tree/main/extensions/open-prose/skills/prose"
+        assert audit_rows == []
+        assert total_skills_reported == 21
+        assert pages_fetched == 1
+        assert observed_at is None
+        return {
+            "repos_seeded": 1,
+            "skills_seeded": 1,
+        }
+
+    monkeypatch.setattr(
+        "skrisk.collectors.skillsmp.SkillsMpClient.fetch_search_page",
+        fake_fetch_search_page,
+    )
+    monkeypatch.setattr(
+        "skrisk.services.sync.RegistrySyncService.seed_registry_snapshot",
+        fake_seed_registry_snapshot,
+    )
+
+    result = runner.invoke(
+        cli,
+        ["seed-registry", "--source", "skillsmp", "--query", "security", "--page", "3"],
+    )
+
+    assert result.exit_code == 0
+    assert "Seeded 1 skills across 1 repos from 21 reported rows" in result.output
+
+
+def test_sync_registry_cli_requires_query_for_skillsmp_source(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKILLSMP_API_KEY", "test-key")
+
+    result = runner.invoke(cli, ["sync-registry", "--source", "skillsmp"])
+
+    assert result.exit_code != 0
+    assert "requires --query" in result.output
 
 
 def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> None:
