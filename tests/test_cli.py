@@ -248,6 +248,9 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
                 "repo": "skills",
                 "skill_slug": "agent-tools",
                 "registry_url": "https://skills.sh/tul-sh/skills/agent-tools",
+                "source": "skillsmp",
+                "source_native_id": "example-agent-tools",
+                "view": "all-time",
                 "weekly_installs": 1200,
                 "weekly_installs_observed_at": cached_observed_at,
                 "registry_rank": 9,
@@ -270,6 +273,9 @@ def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> No
         assert len(sitemap_entries) == 1
         assert sitemap_entries[0].skill_slug == "agent-tools"
         assert sitemap_entries[0].weekly_installs == 1200
+        assert sitemap_entries[0].source == "skillsmp"
+        assert sitemap_entries[0].source_native_id == "example-agent-tools"
+        assert sitemap_entries[0].view == "all-time"
         assert audit_rows == []
         assert callable(skill_loader)
         assert record_directory_fetch is False

@@ -117,6 +117,7 @@ class SkillRepository:
         source_native_id: str | None,
         weekly_installs: int | None,
         registry_rank: int | None,
+        registry_sync_run_id: int | None,
         observed_at: datetime,
         raw_payload: dict[str, Any] | None,
     ) -> int:
@@ -148,6 +149,7 @@ class SkillRepository:
                     source_native_id=source_native_id,
                     weekly_installs=weekly_installs,
                     registry_rank=registry_rank,
+                    current_registry_sync_run_id=registry_sync_run_id,
                     raw_payload=raw_payload,
                     first_seen_at=observed_at,
                     last_seen_at=observed_at,
@@ -161,6 +163,8 @@ class SkillRepository:
                 row.raw_payload = raw_payload
                 first_seen_at = _coerce_datetime_utc(row.first_seen_at) or observed_at
                 last_seen_at = _coerce_datetime_utc(row.last_seen_at) or observed_at
+                if observed_at >= last_seen_at and registry_sync_run_id is not None:
+                    row.current_registry_sync_run_id = registry_sync_run_id
                 row.first_seen_at = min(first_seen_at, observed_at)
                 row.last_seen_at = max(last_seen_at, observed_at)
 
@@ -647,6 +651,7 @@ class SkillRepository:
         title: str | None,
         relative_path: str,
         registry_url: str,
+        registry_source: str | None = None,
     ) -> int:
         async with self._session_factory() as session:
             result = await session.execute(
@@ -669,7 +674,12 @@ class SkillRepository:
                 if title is not None:
                     row.title = title
                 row.relative_path = relative_path
-                row.registry_url = registry_url
+                if registry_source is None or _should_replace_registry_url(
+                    existing_url=row.registry_url,
+                    incoming_url=registry_url,
+                    incoming_source=registry_source,
+                ):
+                    row.registry_url = registry_url
 
             await session.commit()
             await session.refresh(row)
@@ -1142,8 +1152,12 @@ class SkillRepository:
             return {}
 
         result = await session.execute(
-            select(SkillSourceEntry, RegistrySource)
+            select(SkillSourceEntry, RegistrySource, RegistrySyncRun)
             .join(RegistrySource, SkillSourceEntry.registry_source_id == RegistrySource.id)
+            .outerjoin(
+                RegistrySyncRun,
+                RegistrySyncRun.id == SkillSourceEntry.current_registry_sync_run_id,
+            )
             .where(SkillSourceEntry.skill_id.in_(skill_ids))
             .order_by(
                 SkillSourceEntry.skill_id.asc(),
@@ -1152,9 +1166,9 @@ class SkillRepository:
             )
         )
         source_entries_by_skill: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for source_entry, registry_source in result.all():
+        for source_entry, registry_source, registry_sync_run in result.all():
             source_entries_by_skill[source_entry.skill_id].append(
-                _serialize_source_entry(source_entry, registry_source)
+                _serialize_source_entry(source_entry, registry_source, registry_sync_run)
             )
         return dict(source_entries_by_skill)
 
@@ -1180,6 +1194,18 @@ class SkillRepository:
 
     async def get_skill_registry_observation_context(self, *, skill_id: int) -> dict[str, Any] | None:
         async with self._session_factory() as session:
+            source_entries_by_skill = await self._load_source_entries(session, [skill_id])
+            primary_source_entry = _primary_source_entry(source_entries_by_skill.get(skill_id, []))
+            if primary_source_entry is not None:
+                return {
+                    "weekly_installs": primary_source_entry["weekly_installs"],
+                    "observed_at": _coerce_datetime_utc(primary_source_entry["last_seen_at"]),
+                    "registry_rank": primary_source_entry["registry_rank"],
+                    "registry_sync_run_id": primary_source_entry["current_registry_sync_run_id"],
+                    "view": primary_source_entry["view"],
+                    "source": primary_source_entry["source_name"],
+                }
+
             row = await session.get(Skill, skill_id)
             if row is None:
                 return None
@@ -1201,21 +1227,63 @@ class SkillRepository:
                 .where(Skill.repo_id.in_(repo_ids))
                 .order_by(SkillRepo.registry_rank.asc().nulls_last(), Skill.id.asc())
             )
-            return [
-                {
-                    "publisher": repo.publisher,
-                    "repo": repo.repo,
-                    "skill_slug": skill.skill_slug,
-                    "registry_url": skill.registry_url,
-                    "weekly_installs": skill.current_weekly_installs,
-                    "weekly_installs_observed_at": _coerce_datetime_utc(
-                        skill.current_weekly_installs_observed_at
-                    ),
-                    "registry_rank": skill.current_registry_rank,
-                    "registry_sync_run_id": skill.current_registry_sync_run_id,
-                }
-                for skill, repo in result.all()
-            ]
+            skill_rows = result.all()
+            source_entries_by_skill = await self._load_source_entries(
+                session,
+                [skill.id for skill, _ in skill_rows],
+            )
+            entries: list[dict[str, Any]] = []
+            for skill, repo in skill_rows:
+                source_entries = source_entries_by_skill.get(skill.id, [])
+                primary_source_entry = _primary_source_entry(source_entries)
+                entries.append(
+                    {
+                        "publisher": repo.publisher,
+                        "repo": repo.repo,
+                        "skill_slug": skill.skill_slug,
+                        "registry_url": (
+                            primary_source_entry["source_url"]
+                            if primary_source_entry is not None
+                            else skill.registry_url
+                        ),
+                        "source": (
+                            primary_source_entry["source_name"]
+                            if primary_source_entry is not None
+                            else _registry_source_from_url(skill.registry_url)
+                        ),
+                        "source_native_id": (
+                            primary_source_entry["source_native_id"]
+                            if primary_source_entry is not None
+                            else None
+                        ),
+                        "view": (
+                            primary_source_entry["view"]
+                            if primary_source_entry is not None
+                            else "all-time"
+                        ),
+                        "weekly_installs": (
+                            primary_source_entry["weekly_installs"]
+                            if primary_source_entry is not None
+                            else skill.current_weekly_installs
+                        ),
+                        "weekly_installs_observed_at": (
+                            _coerce_datetime_utc(primary_source_entry["last_seen_at"])
+                            if primary_source_entry is not None
+                            else _coerce_datetime_utc(skill.current_weekly_installs_observed_at)
+                        ),
+                        "registry_rank": (
+                            primary_source_entry["registry_rank"]
+                            if primary_source_entry is not None
+                            else skill.current_registry_rank
+                        ),
+                        "registry_sync_run_id": (
+                            primary_source_entry["current_registry_sync_run_id"]
+                            if primary_source_entry is not None
+                            else skill.current_registry_sync_run_id
+                        ),
+                    }
+                )
+            return entries
 
     async def mark_repo_scanned(
         self,
@@ -1261,14 +1329,18 @@ class SkillRepository:
             observations_by_skill = await self._load_registry_observations(session, [skill_row.id])
             observations = observations_by_skill.get(skill_row.id, [])
             source_entry_result = await session.execute(
-                select(SkillSourceEntry, RegistrySource)
+                select(SkillSourceEntry, RegistrySource, RegistrySyncRun)
                 .join(RegistrySource, SkillSourceEntry.registry_source_id == RegistrySource.id)
+                .outerjoin(
+                    RegistrySyncRun,
+                    RegistrySyncRun.id == SkillSourceEntry.current_registry_sync_run_id,
+                )
                 .where(SkillSourceEntry.skill_id == skill_row.id)
                 .order_by(RegistrySource.name.asc(), SkillSourceEntry.id.asc())
             )
             source_entries = [
-                _serialize_source_entry(source_entry, registry_source)
-                for source_entry, registry_source in source_entry_result.all()
+                _serialize_source_entry(source_entry, registry_source, registry_sync_run)
+                for source_entry, registry_source, registry_sync_run in source_entry_result.all()
             ]
             telemetry = _build_install_telemetry(
                 skill_row=skill_row,
@@ -1540,6 +1612,7 @@ def _build_install_telemetry(
 def _serialize_source_entry(
     source_entry: SkillSourceEntry,
     registry_source: RegistrySource,
+    registry_sync_run: RegistrySyncRun | None,
 ) -> dict[str, Any]:
     return {
         "id": source_entry.id,
@@ -1548,12 +1621,56 @@ def _serialize_source_entry(
         "source_base_url": registry_source.base_url,
         "source_url": source_entry.source_url,
         "source_native_id": source_entry.source_native_id,
+        "current_registry_sync_run_id": source_entry.current_registry_sync_run_id,
+        "view": registry_sync_run.view if registry_sync_run is not None else "all-time",
         "weekly_installs": source_entry.weekly_installs,
         "registry_rank": source_entry.registry_rank,
         "first_seen_at": _isoformat_datetime(source_entry.first_seen_at),
         "last_seen_at": _isoformat_datetime(source_entry.last_seen_at),
         "raw_payload": source_entry.raw_payload,
     }
+
+
+def _primary_source_entry(source_entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not source_entries:
+        return None
+    return sorted(
+        source_entries,
+        key=lambda entry: (
+            _registry_source_priority(entry["source_name"]),
+            -1 * _sort_weekly_installs_value(entry["weekly_installs"]),
+            entry["source_url"],
+        ),
+    )[0]
+
+
+def _should_replace_registry_url(
+    *,
+    existing_url: str,
+    incoming_url: str,
+    incoming_source: str,
+) -> bool:
+    existing_source = _registry_source_from_url(existing_url)
+    return _registry_source_priority(incoming_source) < _registry_source_priority(existing_source)
+
+
+def _registry_source_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    lowered = url.casefold()
+    if "skills.sh" in lowered:
+        return "skills.sh"
+    if "skillsmp.com" in lowered:
+        return "skillsmp"
+    return None
+
+
+def _registry_source_priority(source: str | None) -> int:
+    if source == "skills.sh":
+        return 0
+    if source == "skillsmp":
+        return 1
+    return 99
 
 
 def _select_metric_observations(
@@ -1618,8 +1735,16 @@ def _isoformat_datetime(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-def _coerce_datetime_utc(value: datetime | None) -> datetime | None:
+def _coerce_datetime_utc(value: object | None) -> datetime | None:
     if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            value = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)

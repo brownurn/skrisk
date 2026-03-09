@@ -47,6 +47,7 @@ async def test_repository_tracks_multiple_source_entries_and_combined_installs(t
         source_native_id=None,
         weekly_installs=120,
         registry_rank=8,
+        registry_sync_run_id=None,
         observed_at=observed_at,
         raw_payload={"source": "skills.sh"},
     )
@@ -57,6 +58,7 @@ async def test_repository_tracks_multiple_source_entries_and_combined_installs(t
         source_native_id="example-agent-tools",
         weekly_installs=55,
         registry_rank=None,
+        registry_sync_run_id=None,
         observed_at=observed_at,
         raw_payload={"source": "skillsmp"},
     )
@@ -133,6 +135,7 @@ async def test_skill_source_entry_prefers_source_native_id_and_preserves_first_l
         source_native_id="example-agent-tools",
         weekly_installs=55,
         registry_rank=4,
+        registry_sync_run_id=None,
         observed_at=later_observed_at,
         raw_payload={"source": "skillsmp", "version": 1},
     )
@@ -143,6 +146,7 @@ async def test_skill_source_entry_prefers_source_native_id_and_preserves_first_l
         source_native_id="example-agent-tools",
         weekly_installs=65,
         registry_rank=5,
+        registry_sync_run_id=None,
         observed_at=earlier_observed_at,
         raw_payload={"source": "skillsmp", "version": 2},
     )
@@ -166,6 +170,8 @@ async def test_skill_source_entry_prefers_source_native_id_and_preserves_first_l
             "source_base_url": "https://skillsmp.com",
             "source_url": "https://skillsmp.com/fr/skills/example-agent-tools",
             "source_native_id": "example-agent-tools",
+            "current_registry_sync_run_id": None,
+            "view": "all-time",
             "weekly_installs": 65,
             "registry_rank": 5,
             "first_seen_at": earlier_observed_at.isoformat(),
@@ -211,6 +217,7 @@ async def test_skill_source_entry_upgrades_existing_url_row_when_native_id_arriv
         source_native_id=None,
         weekly_installs=40,
         registry_rank=None,
+        registry_sync_run_id=None,
         observed_at=observed_at,
         raw_payload={"stage": "discovery"},
     )
@@ -221,6 +228,7 @@ async def test_skill_source_entry_upgrades_existing_url_row_when_native_id_arriv
         source_native_id="example-agent-tools",
         weekly_installs=45,
         registry_rank=2,
+        registry_sync_run_id=None,
         observed_at=observed_at,
         raw_payload={"stage": "api"},
     )

@@ -19,6 +19,10 @@ _LEGACY_SKILLS_COLUMN_MIGRATIONS = {
     "current_registry_sync_run_id": "INTEGER",
 }
 
+_LEGACY_SKILL_SOURCE_ENTRY_COLUMN_MIGRATIONS = {
+    "current_registry_sync_run_id": "INTEGER",
+}
+
 
 def create_sqlite_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
     """Create an async session factory and retain its engine for setup."""
@@ -87,6 +91,18 @@ def _run_sqlite_additive_migrations(connection) -> None:
         )
     )
     if "skill_source_entries" in inspector.get_table_names():
+        skill_source_entry_columns = {
+            column["name"]
+            for column in inspector.get_columns("skill_source_entries")
+        }
+        for column_name, column_type in _LEGACY_SKILL_SOURCE_ENTRY_COLUMN_MIGRATIONS.items():
+            if column_name in skill_source_entry_columns:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE skill_source_entries ADD COLUMN {column_name} {column_type}"
+                )
+            )
         connection.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_skill_source_entries_skill_source "
@@ -97,5 +113,11 @@ def _run_sqlite_additive_migrations(connection) -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS ix_skill_source_entries_skill_last_seen "
                 "ON skill_source_entries (skill_id, last_seen_at DESC, id DESC)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_skill_source_entries_skill_current_run "
+                "ON skill_source_entries (skill_id, current_registry_sync_run_id, id DESC)"
             )
         )

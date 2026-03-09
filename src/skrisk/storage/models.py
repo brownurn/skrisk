@@ -139,6 +139,9 @@ class SkillSourceEntry(Base):
     source_native_id: Mapped[str | None] = mapped_column(String(255))
     weekly_installs: Mapped[int | None] = mapped_column(Integer)
     registry_rank: Mapped[int | None] = mapped_column(Integer)
+    current_registry_sync_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("registry_sync_runs.id")
+    )
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -151,6 +154,9 @@ class SkillSourceEntry(Base):
 
     skill: Mapped[Skill] = relationship(back_populates="source_entries")
     registry_source: Mapped[RegistrySource] = relationship(back_populates="skill_entries")
+    current_registry_sync_run: Mapped["RegistrySyncRun | None"] = relationship(
+        foreign_keys=[current_registry_sync_run_id]
+    )
 
     __table_args__ = (
         UniqueConstraint(

@@ -15,13 +15,16 @@ AUDIT_ROWS_PATTERN = re.compile(r'"rows"\s*:\s*(\[[\s\S]*?\])\s*,\s*"totalRows"'
 
 @dataclass(slots=True, frozen=True)
 class SkillSitemapEntry:
-    """A single skill URL discovered from the public sitemap."""
+    """A normalized registry entry discovered from a directory source."""
 
     publisher: str
     repo: str
     skill_slug: str
     url: str
     weekly_installs: int | None = None
+    source: str = "skills.sh"
+    source_native_id: str | None = None
+    view: str = "all-time"
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,6 +77,7 @@ def parse_sitemap(xml: str) -> list[SkillSitemapEntry]:
                 repo=parts[1],
                 skill_slug=parts[2],
                 url=url,
+                source="skills.sh",
             )
         )
 
@@ -115,6 +119,7 @@ def parse_directory_page(
     payload: dict[str, Any],
     *,
     base_url: str = "https://skills.sh",
+    view: str = "all-time",
 ) -> DirectoryPage:
     """Normalize a paginated `/api/skills/<view>/<page>` response."""
 
@@ -140,6 +145,8 @@ def parse_directory_page(
                 skill_slug=skill_slug,
                 url=f"{base_url}/{publisher}/{repo}/{skill_slug}",
                 weekly_installs=weekly_installs,
+                source="skills.sh",
+                view=view,
             )
         )
 
