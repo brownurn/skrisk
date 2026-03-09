@@ -21,6 +21,7 @@ _LEGACY_SKILLS_COLUMN_MIGRATIONS = {
 
 _LEGACY_SKILL_SOURCE_ENTRY_COLUMN_MIGRATIONS = {
     "current_registry_sync_run_id": "INTEGER",
+    "current_registry_sync_observed_at": "DATETIME",
 }
 
 

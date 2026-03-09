@@ -12,7 +12,9 @@ from skrisk.config import load_settings
 from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
+from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
 from skrisk.services.intel_sync import AbuseChSyncService
+from skrisk.services.search_index import SearchIndexService, build_skill_document
 from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySnapshot, RegistrySyncService, SkillsShClient
 from skrisk.services.vt_triage import VTTriageService
@@ -238,6 +240,69 @@ def sync_skillsmp_discovery_command(urls: tuple[str, ...]) -> None:
         )
 
     from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("check-runtime")
+def check_runtime_command() -> None:
+    """Verify required OpenSearch and Neo4j services are reachable."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        await SearchIndexService(settings=settings).ensure_runtime()
+        await GraphProjectService(settings=settings).ensure_runtime()
+        click.echo("OpenSearch and Neo4j are reachable")
+
+    asyncio.run(_run())
+
+
+@cli.command("index-search")
+@click.option("--limit", default=100, show_default=True, type=click.IntRange(min=1))
+def index_search_command(limit: int) -> None:
+    """Index a bounded batch of canonical skills into OpenSearch."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        repository = SkillRepository(session_factory)
+        rows = await repository.list_skills(limit=limit, sort="priority")
+        documents = [build_skill_document(row) for row in rows]
+        indexed = await SearchIndexService(settings=settings).bulk_index(documents)
+        click.echo(f"Indexed {indexed} skills into {settings.opensearch_index_name}")
+
+    asyncio.run(_run())
+
+
+@cli.command("project-graph")
+@click.option("--limit", default=50, show_default=True, type=click.IntRange(min=1))
+def project_graph_command(limit: int) -> None:
+    """Project a bounded batch of skill relationships into Neo4j."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        repository = SkillRepository(session_factory)
+        rows = await repository.list_skills(limit=limit, sort="priority")
+        service = GraphProjectService(settings=settings)
+        statement_count = 0
+        projected_skills = 0
+        for row in rows:
+            detail = await repository.get_skill_detail(
+                publisher=row["publisher"],
+                repo=row["repo"],
+                skill_slug=row["skill_slug"],
+            )
+            if detail is None:
+                continue
+            statement_count += await service.project_payload(build_skill_graph_payload(detail))
+            projected_skills += 1
+        click.echo(f"Projected {projected_skills} skills into Neo4j with {statement_count} statements")
 
     asyncio.run(_run())
 

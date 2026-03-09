@@ -814,8 +814,145 @@ async def test_registry_sync_service_preserves_rank_and_title_when_scan_due_has_
             )
         )
         skill_row = await session.scalar(select(Skill).where(Skill.skill_slug == "agent-tools"))
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
 
     assert repo_row is not None
     assert repo_row.registry_rank == 5
     assert skill_row is not None
     assert skill_row.title == "Agent Tools"
+    assert detail is not None
+    assert detail["source_entries"][0]["source_name"] == "skills.sh"
+    assert detail["source_entries"][0]["registry_rank"] == 5
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_service_keeps_skills_sh_rank_off_skillsmp_provenance(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'source-rank-isolation.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    service = RegistrySyncService(
+        session_factory=session_factory,
+        analyzer=SkillAnalyzer(),
+    )
+    observed_at = datetime(2026, 3, 8, 12, 0, tzinfo=UTC)
+    entries = [
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skills.sh/tul-sh/skills/agent-tools",
+            weekly_installs=500,
+            source="skills.sh",
+        ),
+        SkillSitemapEntry(
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            url="https://skillsmp.com/skills/example-agent-tools",
+            weekly_installs=400,
+            source="skillsmp",
+            source_native_id="example-agent-tools",
+        ),
+    ]
+    audit_rows = [
+        AuditRow(
+            rank=5,
+            publisher="tul-sh",
+            repo="skills",
+            skill_slug="agent-tools",
+            name="Agent Tools",
+            partners={},
+        )
+    ]
+
+    await service.seed_registry_snapshot(
+        sitemap_entries=entries,
+        audit_rows=audit_rows,
+        total_skills_reported=2,
+        pages_fetched=1,
+        observed_at=observed_at,
+    )
+
+    repository = SkillRepository(session_factory)
+    detail = await repository.get_skill_detail(
+        publisher="tul-sh",
+        repo="skills",
+        skill_slug="agent-tools",
+    )
+
+    assert detail is not None
+    assert detail["current_total_installs"] == 900
+    assert detail["current_registry_rank"] == 5
+    assert detail["source_count"] == 2
+    assert detail["source_entries"] == [
+        {
+            "id": 1,
+            "registry_source_id": 1,
+            "source_name": "skills.sh",
+            "source_base_url": "https://skills.sh",
+            "source_url": "https://skills.sh/tul-sh/skills/agent-tools",
+            "source_native_id": None,
+            "current_registry_sync_run_id": 1,
+            "current_registry_sync_observed_at": observed_at.isoformat(),
+            "view": "all-time",
+            "weekly_installs": 500,
+            "registry_rank": 5,
+            "raw_payload": {
+                "publisher": "tul-sh",
+                "repo": "skills",
+                "skill_slug": "agent-tools",
+                "source": "skills.sh",
+                "view": "all-time",
+                "source_url": "https://skills.sh/tul-sh/skills/agent-tools",
+                "source_native_id": None,
+                "repo_url": None,
+                "author": None,
+                "description": None,
+                "stars": None,
+                "updated_at": None,
+                "weekly_installs": 500,
+            },
+            "first_seen_at": observed_at.isoformat(),
+            "last_seen_at": observed_at.isoformat(),
+        },
+        {
+            "id": 2,
+            "registry_source_id": 2,
+            "source_name": "skillsmp",
+            "source_base_url": "https://skillsmp.com",
+            "source_url": "https://skillsmp.com/skills/example-agent-tools",
+            "source_native_id": "example-agent-tools",
+            "current_registry_sync_run_id": 2,
+            "current_registry_sync_observed_at": observed_at.isoformat(),
+            "view": "all-time",
+            "weekly_installs": 400,
+            "registry_rank": None,
+            "raw_payload": {
+                "publisher": "tul-sh",
+                "repo": "skills",
+                "skill_slug": "agent-tools",
+                "source": "skillsmp",
+                "view": "all-time",
+                "source_url": "https://skillsmp.com/skills/example-agent-tools",
+                "source_native_id": "example-agent-tools",
+                "repo_url": None,
+                "author": None,
+                "description": None,
+                "stars": None,
+                "updated_at": None,
+                "weekly_installs": 400,
+            },
+            "first_seen_at": observed_at.isoformat(),
+            "last_seen_at": observed_at.isoformat(),
+        },
+    ]
+
+    observations = await repository.list_skill_registry_observations(skill_id=1)
+    assert [row["registry_rank"] for row in observations] == [5, None]

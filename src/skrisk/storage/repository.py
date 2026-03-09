@@ -848,9 +848,9 @@ class SkillRepository:
                         "weekly_installs_delta": telemetry["weekly_installs_delta"],
                         "impact_score": telemetry["impact_score"],
                         "priority_score": telemetry["priority_score"],
-                        "current_total_installs": skill_row.current_total_installs,
+                        "current_total_installs": _resolved_total_installs(skill_row),
                         "current_total_installs_observed_at": _isoformat_datetime(
-                            skill_row.current_total_installs_observed_at
+                            _resolved_total_installs_observed_at(skill_row)
                         ),
                         "source_count": len(source_entries),
                         "sources": [entry["source_name"] for entry in source_entries],
@@ -1415,9 +1415,9 @@ class SkillRepository:
                 "current_weekly_installs_observed_at": telemetry[
                     "current_weekly_installs_observed_at"
                 ],
-                "current_total_installs": skill_row.current_total_installs,
+                "current_total_installs": _resolved_total_installs(skill_row),
                 "current_total_installs_observed_at": _isoformat_datetime(
-                    skill_row.current_total_installs_observed_at
+                    _resolved_total_installs_observed_at(skill_row)
                 ),
                 "current_registry_rank": skill_row.current_registry_rank,
                 "source_count": len(source_entries),
@@ -1642,6 +1642,18 @@ def _build_install_telemetry(
         "impact_score": metrics.impact_score,
         "priority_score": metrics.priority_score,
     }
+
+
+def _resolved_total_installs(skill_row: Skill) -> int | None:
+    if skill_row.current_total_installs is not None:
+        return skill_row.current_total_installs
+    return skill_row.current_weekly_installs
+
+
+def _resolved_total_installs_observed_at(skill_row: Skill) -> datetime | None:
+    if skill_row.current_total_installs_observed_at is not None:
+        return _coerce_datetime_utc(skill_row.current_total_installs_observed_at)
+    return _coerce_datetime_utc(skill_row.current_weekly_installs_observed_at)
 
 
 def _serialize_source_entry(

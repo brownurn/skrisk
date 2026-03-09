@@ -142,6 +142,9 @@ class SkillSourceEntry(Base):
     current_registry_sync_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("registry_sync_runs.id")
     )
+    current_registry_sync_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

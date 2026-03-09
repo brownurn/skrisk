@@ -17,10 +17,28 @@ test('loadSkillsPage requests paginated server-side skills data and normalizes i
 						title: 'Agent Tools',
 						current_weekly_installs: 12_000,
 						current_weekly_installs_observed_at: '2026-03-07T08:00:00+00:00',
+						current_total_installs: 15_500,
+						current_total_installs_observed_at: '2026-03-07T08:00:00+00:00',
 						peak_weekly_installs: 18_000,
 						weekly_installs_delta: 3_000,
 						impact_score: 90,
 						priority_score: 94,
+						source_count: 2,
+						sources: ['skills.sh', 'skillsmp'],
+						install_breakdown: [
+							{
+								source_name: 'skills.sh',
+								weekly_installs: 12_000,
+								source_url: 'https://skills.sh/tul-sh/skills/agent-tools',
+								registry_rank: 1
+							},
+							{
+								source_name: 'skillsmp',
+								weekly_installs: 3_500,
+								source_url: 'https://skillsmp.com/skills/example-agent-tools',
+								registry_rank: null
+							}
+						],
 						latest_snapshot: {
 							id: 14,
 							version_label: 'v1.3.0',
@@ -75,10 +93,14 @@ test('loadSkillsPage requests paginated server-side skills data and normalizes i
 		skillSlug: 'agent-tools',
 		currentWeeklyInstalls: 12_000,
 		currentWeeklyInstallsObservedAt: '2026-03-07T08:00:00+00:00',
+		currentTotalInstalls: 15_500,
+		currentTotalInstallsObservedAt: '2026-03-07T08:00:00+00:00',
 		peakWeeklyInstalls: 18_000,
 		weeklyInstallsDelta: 3_000,
 		impactScore: 90,
-		priorityScore: 94
+		priorityScore: 94,
+		sourceCount: 2,
+		sources: ['skills.sh', 'skillsmp']
 	});
 });
 
@@ -94,10 +116,46 @@ test('loadSkillDetail normalizes install history rows', async () => {
 				registry_url: 'https://skills.sh/tul-sh/skills/agent-tools',
 				current_weekly_installs: 1_500,
 				current_weekly_installs_observed_at: '2026-03-07T08:00:00+00:00',
+				current_total_installs: 1_900,
+				current_total_installs_observed_at: '2026-03-07T08:00:00+00:00',
 				peak_weekly_installs: 2_000,
 				weekly_installs_delta: 500,
 				impact_score: 60,
 				priority_score: 94,
+				source_count: 2,
+				sources: ['skills.sh', 'skillsmp'],
+				install_breakdown: [
+					{
+						source_name: 'skills.sh',
+						weekly_installs: 1_500,
+						source_url: 'https://skills.sh/tul-sh/skills/agent-tools',
+						registry_rank: 4
+					},
+					{
+						source_name: 'skillsmp',
+						weekly_installs: 400,
+						source_url: 'https://skillsmp.com/skills/example-agent-tools',
+						registry_rank: null
+					}
+				],
+				source_entries: [
+					{
+						id: 1,
+						registry_source_id: 1,
+						source_name: 'skills.sh',
+						source_base_url: 'https://skills.sh',
+						source_url: 'https://skills.sh/tul-sh/skills/agent-tools',
+						source_native_id: null,
+						current_registry_sync_run_id: 10,
+						current_registry_sync_observed_at: '2026-03-07T08:00:00+00:00',
+						view: 'all-time',
+						weekly_installs: 1_500,
+						registry_rank: 4,
+						first_seen_at: '2026-03-01T08:00:00+00:00',
+						last_seen_at: '2026-03-07T08:00:00+00:00',
+						raw_payload: { source: 'skills.sh' }
+					}
+				],
 				install_history: [
 					{
 						id: 1,
@@ -155,11 +213,14 @@ test('loadSkillDetail normalizes install history rows', async () => {
 
 	expect(skill).toMatchObject({
 		currentWeeklyInstalls: 1_500,
+		currentTotalInstalls: 1_900,
 		peakWeeklyInstalls: 2_000,
 		weeklyInstallsDelta: 500,
 		impactScore: 60,
-		priorityScore: 94
+		priorityScore: 94,
+		sources: ['skills.sh', 'skillsmp']
 	});
+	expect(skill.sourceEntries[0].sourceName).toBe('skills.sh');
 	expect(skill.installHistory).toEqual([
 		{
 			id: 1,

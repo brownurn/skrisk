@@ -149,15 +149,15 @@ Add `skillsmp.com` as a first-class registry beside `skills.sh`, while preservin
 ### Docker Runtime
 
 - Add Docker Compose services for:
-  - `skrisk`
   - `opensearch`
-  - `opensearch-dashboards` optionally later
   - `neo4j`
+- Keep the SK Risk app itself running locally in this phase; Docker Compose is only for the required backing services.
 - SK Risk startup should verify required service connectivity and fail fast if `OpenSearch` or `Neo4j` are configured as required but unavailable.
 - Add background/projector services for:
   - search indexing
   - graph projection
   - source crawling
+- `opensearch-dashboards` is deferred; the current implementation target is the runtime pair that directly improves SK Risk search and graph pivots.
 
 ### Coverage Expectations
 
