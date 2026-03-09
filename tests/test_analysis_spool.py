@@ -155,3 +155,55 @@ async def test_producer_service_spools_artifacts_without_persisting_to_db(
     assert summary["skills_analyzed"] == 1
     assert len(spool.list_pending_artifacts()) == 1
     assert detail is None
+
+
+@pytest.mark.asyncio
+async def test_ingest_service_continuous_mode_polls_until_artifact_arrives(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=None,
+    )
+    claim = spool.claim_repo(
+        {
+            "id": repo_id,
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "source_url": "https://github.com/tul-sh/skills",
+        }
+    )
+    assert claim is not None
+
+    original_list_pending_artifacts = spool.list_pending_artifacts
+    calls = {"count": 0}
+
+    def fake_list_pending_artifacts():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return []
+        if calls["count"] == 2:
+            spool.write_artifact(claim=claim, analyzed_checkout=_sample_checkout())
+        return original_list_pending_artifacts()
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(spool, "list_pending_artifacts", fake_list_pending_artifacts)
+    monkeypatch.setattr("skrisk.services.analysis_spool.asyncio.sleep", fake_sleep)
+
+    service = AnalysisSpoolIngestService(
+        session_factory=session_factory,
+        spool=spool,
+    )
+    summary = await service.run_once(limit_artifacts=10, continuous=True, max_idle_polls=2)
+
+    assert summary["artifacts_ingested"] == 1

@@ -103,6 +103,8 @@ class AnalysisSpoolIngestService:
         *,
         limit_artifacts: int,
         continuous: bool,
+        poll_interval_seconds: float = 2.0,
+        max_idle_polls: int | None = None,
     ) -> dict[str, int]:
         summary = {
             "artifacts_seen": 0,
@@ -110,11 +112,19 @@ class AnalysisSpoolIngestService:
             "artifacts_failed": 0,
             "skills_ingested": 0,
         }
+        idle_polls = 0
 
         while True:
             artifacts = self._spool.list_pending_artifacts()[:limit_artifacts]
             if not artifacts:
-                break
+                if not continuous:
+                    break
+                idle_polls += 1
+                if max_idle_polls is not None and idle_polls >= max_idle_polls:
+                    break
+                await asyncio.sleep(poll_interval_seconds)
+                continue
+            idle_polls = 0
             summary["artifacts_seen"] += len(artifacts)
             for artifact_path in artifacts:
                 try:
