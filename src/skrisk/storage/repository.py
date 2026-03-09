@@ -418,6 +418,22 @@ class SkillRepository:
             await session.refresh(row)
             return row.id
 
+    async def indicator_has_completed_enrichment(
+        self,
+        *,
+        indicator_id: int,
+        provider: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            result = await session.scalar(
+                select(func.count())
+                .select_from(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id == indicator_id)
+                .where(IndicatorEnrichment.provider == provider)
+                .where(IndicatorEnrichment.status == "completed")
+            )
+            return bool(result)
+
     async def enqueue_vt_lookup(
         self,
         *,
@@ -935,6 +951,59 @@ class SkillRepository:
                 for row in rows
             ]
 
+    async def list_infrastructure_candidates(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            link_count = func.count(SkillIndicatorLink.id)
+            result = await session.execute(
+                select(Indicator, link_count.label("link_count"))
+                .outerjoin(SkillIndicatorLink, SkillIndicatorLink.indicator_id == Indicator.id)
+                .where(Indicator.indicator_type.in_(("domain", "ip")))
+                .group_by(Indicator.id)
+                .order_by(link_count.desc(), Indicator.id.asc())
+                .limit(max(limit * 5, limit))
+            )
+            indicator_rows = result.all()
+            indicator_ids = [indicator.id for indicator, _ in indicator_rows]
+            if not indicator_ids:
+                return []
+
+            enrichment_result = await session.execute(
+                select(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
+                .order_by(IndicatorEnrichment.id.asc())
+            )
+            completed_providers_by_indicator: dict[int, set[str]] = defaultdict(set)
+            for enrichment in enrichment_result.scalars().all():
+                if enrichment.status == "completed":
+                    completed_providers_by_indicator[enrichment.indicator_id].add(enrichment.provider)
+
+            candidates: list[dict[str, Any]] = []
+            for indicator, linked_skill_count in indicator_rows:
+                completed_providers = completed_providers_by_indicator.get(indicator.id, set())
+                if indicator.indicator_type == "domain" and {
+                    "local_dns",
+                    "mewhois",
+                }.issubset(completed_providers):
+                    continue
+                if indicator.indicator_type == "ip" and "meip" in completed_providers:
+                    continue
+                candidates.append(
+                    {
+                        "id": indicator.id,
+                        "indicator_type": indicator.indicator_type,
+                        "indicator_value": indicator.indicator_value,
+                        "completed_providers": sorted(completed_providers),
+                        "linked_skill_count": int(linked_skill_count or 0),
+                    }
+                )
+                if len(candidates) >= limit:
+                    break
+            return candidates
+
     async def get_vt_queue_status(
         self,
         *,
@@ -1393,6 +1462,26 @@ class SkillRepository:
                     .where(SkillIndicatorLink.skill_snapshot_id == latest_snapshot.id)
                     .order_by(SkillIndicatorLink.id.asc())
                 )
+                link_rows = link_result.all()
+                indicator_ids = [indicator.id for _, indicator in link_rows]
+                enrichments_by_indicator: dict[int, list[dict[str, Any]]] = defaultdict(list)
+                if indicator_ids:
+                    enrichment_result = await session.execute(
+                        select(IndicatorEnrichment)
+                        .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
+                        .order_by(IndicatorEnrichment.id.asc())
+                    )
+                    for enrichment in enrichment_result.scalars().all():
+                        enrichments_by_indicator[enrichment.indicator_id].append(
+                            {
+                                "provider": enrichment.provider,
+                                "lookup_key": enrichment.lookup_key,
+                                "status": enrichment.status,
+                                "summary": enrichment.summary,
+                                "archive_relative_path": enrichment.archive_relative_path,
+                                "normalized_payload": enrichment.normalized_payload,
+                            }
+                        )
                 indicator_links = [
                     {
                         "indicator_id": indicator.id,
@@ -1402,8 +1491,9 @@ class SkillRepository:
                         "extraction_kind": link.extraction_kind,
                         "raw_value": link.raw_value,
                         "is_new_in_snapshot": link.is_new_in_snapshot,
+                        "enrichments": enrichments_by_indicator.get(indicator.id, []),
                     }
-                    for link, indicator in link_result.all()
+                    for link, indicator in link_rows
                 ]
 
             return {

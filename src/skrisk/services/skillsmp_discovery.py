@@ -15,6 +15,10 @@ from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.config import Settings
 
 _SKILL_LINK_RE = re.compile(r"""href=["'](?P<href>[^"']*?/skills/[^"']+)["']""", re.IGNORECASE)
+_LISTING_LINK_RE = re.compile(
+    r"""href=["'](?P<href>[^"']*(?:/categories/[^"']*|/timeline[^"']*|/categories|/timeline|/))["']""",
+    re.IGNORECASE,
+)
 _GITHUB_LINK_RE = re.compile(r"""https://github\.com/[^"'\s<]+""", re.IGNORECASE)
 
 
@@ -75,7 +79,11 @@ class SkillsMpDiscoveryService:
                 )
             )
 
-            if self._is_category_url(url):
+            if self._is_listing_url(url):
+                for listing_url in self._extract_listing_links(html):
+                    normalized_listing_url = self._normalize_url(listing_url)
+                    if normalized_listing_url not in seen_urls:
+                        queue.append(normalized_listing_url)
                 for skill_url in self._extract_skill_links(html):
                     normalized_skill_url = self._normalize_url(skill_url)
                     if normalized_skill_url not in seen_urls:
@@ -95,7 +103,10 @@ class SkillsMpDiscoveryService:
         try:
             from scrapling.fetchers import StealthyFetcher
         except ImportError as exc:
-            raise RuntimeError("scrapling is required for browser-based skillsmp discovery") from exc
+            raise RuntimeError(
+                "scrapling browser fetchers are required for skillsmp discovery; "
+                "install project dependencies and run `scrapling install`"
+            ) from exc
 
         response = await StealthyFetcher.async_fetch(
             url,
@@ -178,13 +189,19 @@ class SkillsMpDiscoveryService:
             for match in _SKILL_LINK_RE.finditer(html)
         ]
 
+    def _extract_listing_links(self, html: str) -> list[str]:
+        return [
+            urljoin(self._settings.skillsmp_base_url, match.group("href"))
+            for match in _LISTING_LINK_RE.finditer(html)
+        ]
+
     def _normalize_url(self, url: str) -> str:
         normalized = urljoin(f"{self._settings.skillsmp_base_url}/", url)
         canonical_skill_url = self._client.canonicalize_skill_url(normalized)
         return canonical_skill_url if canonical_skill_url and "/skills/" in normalized else normalized.rstrip("/")
 
-    def _is_category_url(self, url: str) -> bool:
-        return "/categories/" in urlsplit(url).path
+    def _is_listing_url(self, url: str) -> bool:
+        return "/skills/" not in urlsplit(url).path
 
 
 def _first_github_link(html: str) -> str | None:

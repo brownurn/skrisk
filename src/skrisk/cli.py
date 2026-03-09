@@ -13,6 +13,7 @@ from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
+from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
 from skrisk.services.search_index import SearchIndexService, build_skill_document
 from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
@@ -362,6 +363,34 @@ def enrich_vt_command(limit: int) -> None:
         asyncio.run(_run())
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("enrich-infra")
+@click.option("--limit", default=100, show_default=True, type=click.IntRange(min=1))
+def enrich_infra_command(limit: int) -> None:
+    """Process a bounded batch of infrastructure enrichment lookups."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.archive_root.mkdir(parents=True, exist_ok=True)
+
+        summary = await InfrastructureEnrichmentService(
+            session_factory=session_factory,
+            settings=settings,
+        ).run_once(limit=limit)
+        click.echo(
+            f"{summary['candidates_processed']} infrastructure candidates processed, "
+            f"{summary['whois_completed']} WHOIS, "
+            f"{summary['dns_completed']} DNS, "
+            f"{summary['ip_completed']} IP, "
+            f"{summary['ip_provider_unavailable']} IP skipped unavailable, "
+            f"{summary['failed']} failed"
+        )
+
+    asyncio.run(_run())
 
 
 @cli.command("serve")

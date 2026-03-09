@@ -67,6 +67,61 @@ async def test_skillsmp_discovery_service_normalizes_skill_pages_and_archives_ht
 
 
 @pytest.mark.asyncio
+async def test_skillsmp_discovery_service_crawls_generic_listing_pages(
+    tmp_path,
+) -> None:
+    settings = Settings(
+        archive_root=tmp_path / "archive",
+        skillsmp_base_url="https://skillsmp.com",
+    )
+    responses = {
+        "https://skillsmp.com": """
+            <html>
+              <body>
+                <a href="/categories/security">Security</a>
+                <a href="/timeline">Timeline</a>
+              </body>
+            </html>
+        """,
+        "https://skillsmp.com/categories/security": """
+            <html>
+              <body>
+                <a href="/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md">Prose</a>
+              </body>
+            </html>
+        """,
+        "https://skillsmp.com/timeline": """
+            <html>
+              <body>
+                <a href="/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md">Prose</a>
+              </body>
+            </html>
+        """,
+        "https://skillsmp.com/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md": """
+            <html>
+              <body>
+                <a href="https://github.com/openclaw/openclaw/tree/main/extensions/open-prose/skills/prose">
+                  GitHub
+                </a>
+              </body>
+            </html>
+        """,
+    }
+
+    async def fake_fetch(url: str) -> str:
+        return responses[url]
+
+    service = SkillsMpDiscoveryService(settings=settings, fetch_html=fake_fetch)
+    result = await service.discover_from_urls(
+        ["https://skillsmp.com/"],
+        fetched_at=datetime(2026, 3, 9, 8, 0, tzinfo=UTC),
+    )
+
+    assert len(result.entries) == 1
+    assert result.entries[0].url.endswith("/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md")
+
+
+@pytest.mark.asyncio
 async def test_skillsmp_discovery_entries_merge_with_api_enrichment_without_duplicate_skills(
     tmp_path,
 ) -> None:

@@ -75,6 +75,94 @@ def build_skill_graph_payload(skill_detail: dict[str, Any]) -> dict[str, Any]:
             }
         )
         edges.append({"from": skill_id, "to": indicator_id, "type": "EMITS"})
+        for enrichment in indicator.get("enrichments") or []:
+            if enrichment.get("status") != "completed":
+                continue
+            payload = enrichment.get("normalized_payload") or {}
+            provider = enrichment.get("provider")
+            if provider == "local_dns":
+                for resolved_ip in payload.get("resolved_ips") or []:
+                    resolved_ip_value = str(resolved_ip or "")
+                    if not resolved_ip_value:
+                        continue
+                    resolved_ip_id = f"indicator:ip:{resolved_ip_value}"
+                    nodes.append(
+                        {
+                            "id": resolved_ip_id,
+                            "type": "indicator",
+                            "properties": {
+                                "indicator_type": "ip",
+                                "indicator_value": resolved_ip_value,
+                            },
+                        }
+                    )
+                    edges.append({"from": indicator_id, "to": resolved_ip_id, "type": "RESOLVES_TO"})
+                    profile = (payload.get("resolved_ip_profiles") or {}).get(resolved_ip_value) or {}
+                    asn = str(profile.get("asn") or "").strip()
+                    if asn:
+                        asn_id = f"asn:{asn}"
+                        nodes.append(
+                            {
+                                "id": asn_id,
+                                "type": "asn",
+                                "properties": {
+                                    "asn": asn,
+                                    "as_name": profile.get("asName"),
+                                },
+                            }
+                        )
+                        edges.append({"from": resolved_ip_id, "to": asn_id, "type": "ANNOUNCED_BY"})
+            if provider == "mewhois":
+                registrar = str(payload.get("registrar") or "").strip()
+                if registrar:
+                    registrar_id = f"registrar:{registrar.casefold()}"
+                    nodes.append(
+                        {
+                            "id": registrar_id,
+                            "type": "registrar",
+                            "properties": {"name": registrar},
+                        }
+                    )
+                    edges.append({"from": indicator_id, "to": registrar_id, "type": "REGISTERED_WITH"})
+                registrant_org = str(payload.get("registrantOrg") or "").strip()
+                if registrant_org:
+                    org_id = f"organization:{registrant_org.casefold()}"
+                    nodes.append(
+                        {
+                            "id": org_id,
+                            "type": "organization",
+                            "properties": {"name": registrant_org},
+                        }
+                    )
+                    edges.append({"from": indicator_id, "to": org_id, "type": "REGISTERED_TO"})
+                for nameserver in payload.get("nameservers") or []:
+                    nameserver_value = str(nameserver or "").strip()
+                    if not nameserver_value:
+                        continue
+                    nameserver_id = f"nameserver:{nameserver_value.casefold()}"
+                    nodes.append(
+                        {
+                            "id": nameserver_id,
+                            "type": "nameserver",
+                            "properties": {"hostname": nameserver_value},
+                        }
+                    )
+                    edges.append({"from": indicator_id, "to": nameserver_id, "type": "USES_NAMESERVER"})
+            if provider == "meip":
+                asn = str(payload.get("asn") or "").strip()
+                if asn:
+                    asn_id = f"asn:{asn}"
+                    nodes.append(
+                        {
+                            "id": asn_id,
+                            "type": "asn",
+                            "properties": {
+                                "asn": asn,
+                                "as_name": payload.get("asName"),
+                            },
+                        }
+                    )
+                    edges.append({"from": indicator_id, "to": asn_id, "type": "ANNOUNCED_BY"})
 
     return {
         "nodes": _dedupe_graph_nodes(nodes),

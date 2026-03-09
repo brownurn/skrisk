@@ -17,6 +17,7 @@ def test_cli_help_lists_operational_commands() -> None:
 
     assert result.exit_code == 0
     assert "enrich-vt" in result.output
+    assert "enrich-infra" in result.output
     assert "init-db" in result.output
     assert "scan-due" in result.output
     assert "seed-registry" in result.output
@@ -104,6 +105,34 @@ def test_enrich_vt_cli_rejects_non_positive_limits() -> None:
 
     assert result.exit_code != 0
     assert "0" in result.output
+
+
+def test_enrich_infra_cli_runs_service_with_limit(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKRISK_ARCHIVE_ROOT", str(tmp_path / "archive"))
+
+    async def fake_run_once(self, *, limit=None, requested_at=None):
+        assert limit == 25
+        assert requested_at is None
+        return {
+            "candidates_processed": 12,
+            "whois_completed": 7,
+            "dns_completed": 7,
+            "ip_completed": 3,
+            "ip_provider_unavailable": 0,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(
+        "skrisk.services.infrastructure_enrichment.InfrastructureEnrichmentService.run_once",
+        fake_run_once,
+    )
+
+    result = runner.invoke(cli, ["enrich-infra", "--limit", "25"])
+
+    assert result.exit_code == 0
+    assert "12 infrastructure candidates processed" in result.output
 
 
 def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> None:
