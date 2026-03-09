@@ -71,3 +71,78 @@ Notes:
 2. keep SkillsMP scans targeted to smaller due repos first, then widen
 3. rerun `skrisk enrich-infra` after more SkillsMP-derived snapshots land
 4. reproject search/graph indexes after the next scan checkpoint
+
+## Follow-Up Checkpoint
+
+After the first checkpoint, a broader authenticated SkillsMP API sweep was run across `65` bounded search pages using the live query set:
+
+- `security`
+- `tools`
+- `shell`
+- `network`
+- `browser`
+- `github`
+- `deploy`
+- `data`
+- `api`
+- `auth`
+- `agent`
+- `coding`
+- `terminal`
+
+That sweep produced:
+
+- `3,098` additional seeded SkillsMP page hits
+- `2,357` seeded repo hits before canonical dedupe
+
+Shared database checkpoint after the broader sweep:
+
+- `registry_sources`: `2`
+- `skills_total`: `92,526`
+- `repos_total`: `13,665`
+- `skillsmp_source_entries`: `7,030`
+- `skillsmp_only_skills`: `6,000`
+- `overlap_skills`: `667`
+
+Interpretation:
+
+- the live corpus now contains materially more SkillsMP coverage than the first rollout checkpoint
+- overlap with `skills.sh` is increasing, which confirms the canonical source-entry dedupe model is working
+- a large majority of currently seeded SkillsMP skills remain unique to SkillsMP in the live corpus
+
+## Scan Strategy Adjustment
+
+The first attempt to target the largest unscanned SkillsMP-only repos was intentionally stopped after `NeverSight/learn-skills.dev` started dominating the batch. Even with shallow clone flags, that repo produced an outsized clone and checkout cost relative to the rest of the queue.
+
+Operational adjustment:
+
+- drop giant monorepos from the front of the queue
+- prioritize moderate SkillsMP-only repos first
+- let those scans land more snapshots and indicators per unit time before returning to the largest repos
+
+This was the right change. The next targeted scan batch was re-launched against moderate-size SkillsMP-only repos instead of the largest monorepo outliers.
+
+## Live Analysis Delta
+
+While the corrected moderate-size batch was running, the shared analysis counters had already advanced to:
+
+- `repo_snapshots`: `1,735`
+- `skill_snapshots`: `9,483`
+- `indicators`: `85,333`
+- `skill_indicator_links`: `170,877`
+- `indicator_enrichments`: `5`
+
+Interpretation:
+
+- the SkillsMP rollout is now producing real additional scan artifacts, not only registry metadata
+- new indicators and skill-to-indicator relationships are landing as the moderate-size batch progresses
+- the next enrichment pass should be run after this batch clears, so the `mewhois` / `meip` layer works against the larger post-SkillsMP indicator set
+
+## Scrapling Review Summary
+
+`D4Vinci/Scrapling` remains the right browser-capable tool for the SkillsMP discovery lane, but not for the primary write path. Current recommendation:
+
+- keep the authenticated SkillsMP API as the main incremental ingestion path
+- use Scrapling as a narrower session-based discovery and archive lane
+- prefer persistent session use rather than one-off fetches when Cloudflare or dynamic content requires it
+- keep browser discovery targeted to specific discovery gaps, not full-corpus ingestion by default
