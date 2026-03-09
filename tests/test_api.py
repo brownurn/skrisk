@@ -169,6 +169,106 @@ async def test_api_exposes_latest_skill_stats_and_detail(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_exposes_multi_registry_sources_and_install_breakdown(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'multi-source-api.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="openclaw",
+        repo="openclaw",
+        source_url="https://github.com/openclaw/openclaw",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="prose",
+        title="prose",
+        relative_path="extensions/open-prose/skills/prose",
+        registry_url="https://skills.sh/openclaw/openclaw/prose",
+    )
+    await repository.record_skill_snapshot(
+        skill_id=skill_id,
+        repo_snapshot_id=repo_snapshot_id,
+        folder_hash="hash-prose",
+        version_label="main@abc123",
+        skill_text="name: prose",
+        referenced_files=["SKILL.md"],
+        extracted_domains=[],
+        risk_report={"severity": "medium", "score": 50, "confidence": "likely"},
+    )
+    source_ids = {
+        "skills.sh": await repository.upsert_registry_source(
+            name="skills.sh",
+            base_url="https://skills.sh",
+        ),
+        "skillsmp": await repository.upsert_registry_source(
+            name="skillsmp",
+            base_url="https://skillsmp.com",
+        ),
+    }
+    observed_at = datetime(2026, 3, 7, 8, 0, tzinfo=UTC)
+    await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=source_ids["skills.sh"],
+        source_url="https://skills.sh/openclaw/openclaw/prose",
+        source_native_id=None,
+        weekly_installs=1_500,
+        registry_rank=4,
+        registry_sync_run_id=None,
+        observed_at=observed_at,
+        raw_payload={"source": "skills.sh"},
+    )
+    await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=source_ids["skillsmp"],
+        source_url="https://skillsmp.com/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+        source_native_id="openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+        weekly_installs=400,
+        registry_rank=None,
+        registry_sync_run_id=None,
+        observed_at=observed_at,
+        raw_payload={"source": "skillsmp"},
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        list_response = await client.get("/api/skills?limit=0")
+        detail_response = await client.get("/api/skills/openclaw/openclaw/prose")
+
+    assert list_response.status_code == 200
+    list_payload = list_response.json()
+    assert len(list_payload) == 1
+    assert list_payload[0]["current_weekly_installs"] == 1900
+    assert list_payload[0]["current_total_installs"] == 1900
+    assert list_payload[0]["source_count"] == 2
+    assert list_payload[0]["sources"] == ["skills.sh", "skillsmp"]
+    assert [row["source_name"] for row in list_payload[0]["install_breakdown"]] == [
+        "skills.sh",
+        "skillsmp",
+    ]
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["current_total_installs"] == 1900
+    assert detail["source_count"] == 2
+    assert detail["sources"] == ["skills.sh", "skillsmp"]
+    assert len(detail["source_entries"]) == 2
+    assert detail["source_entries"][1]["source_name"] == "skillsmp"
+
+
+@pytest.mark.asyncio
 async def test_app_factory_initializes_database_from_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(
         "SKRISK_DATABASE_URL",
@@ -236,6 +336,99 @@ async def test_api_skills_limit_zero_returns_full_registry(tmp_path) -> None:
 
     assert response.status_code == 200
     assert {item["skill_slug"] for item in response.json()} == {"alpha", "beta"}
+
+
+@pytest.mark.asyncio
+async def test_api_exposes_multi_registry_provenance_and_combined_installs(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'multi-registry-api.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="openclaw",
+        repo="openclaw",
+        source_url="https://github.com/openclaw/openclaw",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="prose",
+        title="Prose",
+        relative_path="extensions/open-prose/skills/prose",
+        registry_url="https://skills.sh/openclaw/openclaw/prose",
+        registry_source="skills.sh",
+    )
+    await repository.record_skill_snapshot(
+        skill_id=skill_id,
+        repo_snapshot_id=repo_snapshot_id,
+        folder_hash="hash-prose",
+        version_label="main@abc123",
+        skill_text="name: prose",
+        referenced_files=["SKILL.md"],
+        extracted_domains=[],
+        risk_report={"severity": "medium", "score": 42, "confidence": "likely"},
+    )
+    skills_sh_source_id = await repository.upsert_registry_source(
+        name="skills.sh",
+        base_url="https://skills.sh",
+    )
+    skillsmp_source_id = await repository.upsert_registry_source(
+        name="skillsmp",
+        base_url="https://skillsmp.com",
+    )
+    observed_at = datetime(2026, 3, 8, 9, 0, tzinfo=UTC)
+    await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=skills_sh_source_id,
+        source_url="https://skills.sh/openclaw/openclaw/prose",
+        source_native_id=None,
+        weekly_installs=1200,
+        registry_rank=3,
+        registry_sync_run_id=None,
+        observed_at=observed_at,
+        raw_payload={"source": "skills.sh"},
+    )
+    await repository.upsert_skill_source_entry(
+        skill_id=skill_id,
+        registry_source_id=skillsmp_source_id,
+        source_url="https://skillsmp.com/skills/openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+        source_native_id="openclaw-openclaw-extensions-open-prose-skills-prose-skill-md",
+        weekly_installs=300,
+        registry_rank=None,
+        registry_sync_run_id=None,
+        observed_at=observed_at,
+        raw_payload={"source": "skillsmp", "author": "openclaw"},
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        list_response = await client.get("/api/skills?limit=1")
+        detail_response = await client.get("/api/skills/openclaw/openclaw/prose")
+
+    assert list_response.status_code == 200
+    list_payload = list_response.json()
+    assert len(list_payload) == 1
+    assert list_payload[0]["current_total_installs"] == 1500
+    assert list_payload[0]["source_count"] == 2
+    assert list_payload[0]["sources"] == ["skills.sh", "skillsmp"]
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["current_total_installs"] == 1500
+    assert detail["source_count"] == 2
+    assert [entry["source_name"] for entry in detail["source_entries"]] == ["skills.sh", "skillsmp"]
+    assert [entry["weekly_installs"] for entry in detail["source_entries"]] == [1200, 300]
 
 
 @pytest.mark.asyncio

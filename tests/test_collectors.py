@@ -104,6 +104,7 @@ def test_parse_directory_page_extracts_registry_entries() -> None:
     assert [entry.publisher for entry in page.entries] == ["tul-sh", "vercel-labs"]
     assert [entry.repo for entry in page.entries] == ["skills", "agent-skills"]
     assert [entry.skill_slug for entry in page.entries] == ["agent-tools", "frontend-design"]
+    assert [entry.source for entry in page.entries] == ["skills.sh", "skills.sh"]
     assert page.entries[0].url == "https://skills.sh/tul-sh/skills/agent-tools"
     assert page.entries[0].weekly_installs == 1234
     assert page.entries[1].weekly_installs == 567

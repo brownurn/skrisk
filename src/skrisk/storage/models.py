@@ -62,6 +62,26 @@ class SkillRepoSnapshot(Base):
     )
 
 
+class RegistrySource(Base):
+    """A first-class source registry such as skills.sh or skillsmp."""
+
+    __tablename__ = "registry_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    skill_entries: Mapped[list["SkillSourceEntry"]] = relationship(back_populates="registry_source")
+
+    __table_args__ = (UniqueConstraint("name", name="uq_registry_source_name"),)
+
+
 class Skill(Base):
     """Logical skill tracked across repo snapshots."""
 
@@ -75,6 +95,10 @@ class Skill(Base):
     registry_url: Mapped[str] = mapped_column(String(2000), nullable=False)
     current_weekly_installs: Mapped[int | None] = mapped_column(Integer)
     current_weekly_installs_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    current_total_installs: Mapped[int | None] = mapped_column(Integer)
+    current_total_installs_observed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
     current_registry_rank: Mapped[int | None] = mapped_column(Integer)
@@ -98,8 +122,59 @@ class Skill(Base):
     registry_observations: Mapped[list["SkillRegistryObservation"]] = relationship(
         back_populates="skill"
     )
+    source_entries: Mapped[list["SkillSourceEntry"]] = relationship(back_populates="skill")
 
     __table_args__ = (UniqueConstraint("repo_id", "skill_slug", name="uq_repo_skill"),)
+
+
+class SkillSourceEntry(Base):
+    """Registry-specific provenance for a canonical skill."""
+
+    __tablename__ = "skill_source_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id"), nullable=False)
+    registry_source_id: Mapped[int] = mapped_column(ForeignKey("registry_sources.id"), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    source_native_id: Mapped[str | None] = mapped_column(String(255))
+    weekly_installs: Mapped[int | None] = mapped_column(Integer)
+    registry_rank: Mapped[int | None] = mapped_column(Integer)
+    current_registry_sync_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("registry_sync_runs.id")
+    )
+    current_registry_sync_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    skill: Mapped[Skill] = relationship(back_populates="source_entries")
+    registry_source: Mapped[RegistrySource] = relationship(back_populates="skill_entries")
+    current_registry_sync_run: Mapped["RegistrySyncRun | None"] = relationship(
+        foreign_keys=[current_registry_sync_run_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "skill_id",
+            "registry_source_id",
+            "source_url",
+            name="uq_skill_source_entry",
+        ),
+        UniqueConstraint(
+            "skill_id",
+            "registry_source_id",
+            "source_native_id",
+            name="uq_skill_source_native_entry",
+        ),
+    )
 
 
 class SkillSnapshot(Base):

@@ -46,7 +46,12 @@
 					priority {data.skill.priorityScore}
 				</span>
 				<span class="token">impact {data.skill.impactScore}</span>
-				<span class="token">weekly installs {formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</span>
+				<span class="token">
+					total installs {formatWeeklyInstalls(data.skill.currentTotalInstalls ?? data.skill.currentWeeklyInstalls)}
+				</span>
+				{#each data.skill.sources as source}
+					<span class="token">{source}</span>
+				{/each}
 				<span class="token">version {snapshot.versionLabel || 'unknown'}</span>
 				<span class="token">confidence {snapshot.riskReport.confidence ?? 'unscored'}</span>
 			</div>
@@ -58,8 +63,10 @@
 				<strong class="mono">{data.skill.relativePath}</strong>
 			</div>
 			<div class="kpi-line">
-				<span class="muted">Latest installs</span>
-				<strong>{formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</strong>
+				<span class="muted">Total installs</span>
+				<strong>
+					{formatWeeklyInstalls(data.skill.currentTotalInstalls ?? data.skill.currentWeeklyInstalls)}
+				</strong>
 			</div>
 			<div class="kpi-line">
 				<span class="muted">Peak installs</span>
@@ -67,7 +74,11 @@
 			</div>
 			<div class="kpi-line">
 				<span class="muted">Last observed</span>
-				<strong>{formatObservedAt(data.skill.currentWeeklyInstallsObservedAt)}</strong>
+				<strong>
+					{formatObservedAt(
+						data.skill.currentTotalInstallsObservedAt ?? data.skill.currentWeeklyInstallsObservedAt
+					)}
+				</strong>
 			</div>
 			<div class="kpi-line">
 				<span class="muted">Risk score</span>
@@ -83,9 +94,15 @@
 
 <section class="metric-grid">
 	<article class="metric-card">
-		<p class="metric-label">Latest Weekly Installs</p>
-		<p class="metric-value">{formatWeeklyInstalls(data.skill.currentWeeklyInstalls)}</p>
-		<p class="muted">{formatObservedAt(data.skill.currentWeeklyInstallsObservedAt)}</p>
+		<p class="metric-label">Total Installs</p>
+		<p class="metric-value">
+			{formatWeeklyInstalls(data.skill.currentTotalInstalls ?? data.skill.currentWeeklyInstalls)}
+		</p>
+		<p class="muted">
+			{formatObservedAt(
+				data.skill.currentTotalInstallsObservedAt ?? data.skill.currentWeeklyInstallsObservedAt
+			)}
+		</p>
 	</article>
 	<article class="metric-card">
 		<p class="metric-label">Peak Weekly Installs</p>
@@ -123,6 +140,56 @@
 		<p class="metric-label">Findings</p>
 		<p class="metric-value">{snapshot.riskReport.findings.length}</p>
 	</article>
+</section>
+
+<section class="table-card page-section">
+	<div class="table-header">
+		<div>
+			<p class="table-label">Registry provenance</p>
+			<h2>Seen in registries</h2>
+		</div>
+	</div>
+
+	{#if data.skill.sourceEntries.length > 0}
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>Registry</th>
+						<th>Installs</th>
+						<th>Rank</th>
+						<th>Last seen</th>
+						<th>Source URL</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each data.skill.sourceEntries as sourceEntry}
+						<tr>
+							<td>
+								<strong>{sourceEntry.sourceName}</strong>
+								<p class="table-subtext">{sourceEntry.view}</p>
+							</td>
+							<td class="mono">{formatWeeklyInstalls(sourceEntry.weeklyInstalls)}</td>
+							<td>{formatOptional(sourceEntry.registryRank?.toString(), 'n/a')}</td>
+							<td>{formatObservedAt(sourceEntry.lastSeenAt)}</td>
+							<td class="mono">
+								<a
+									class="inline-link"
+									href={sourceEntry.sourceUrl}
+									target="_blank"
+									rel="noreferrer"
+								>
+									{sourceEntry.sourceUrl}
+								</a>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{:else}
+		<div class="empty-state">No registry provenance has been recorded for this skill yet.</div>
+	{/if}
 </section>
 
 <section class="panel-grid">

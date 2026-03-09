@@ -44,7 +44,8 @@
 
 	const pageWeeklyInstalls = $derived.by(() =>
 		data.page.items.reduce(
-			(total: number, skill: SkillSummary) => total + (skill.currentWeeklyInstalls ?? 0),
+			(total: number, skill: SkillSummary) =>
+				total + (skill.currentTotalInstalls ?? skill.currentWeeklyInstalls ?? 0),
 			0
 		)
 	);
@@ -54,7 +55,8 @@
 	const pageTenKInstalls = $derived.by(
 		() =>
 			data.page.items.filter(
-				(skill: SkillSummary) => (skill.currentWeeklyInstalls ?? 0) >= 10_000
+				(skill: SkillSummary) =>
+					(skill.currentTotalInstalls ?? skill.currentWeeklyInstalls ?? 0) >= 10_000
 			).length
 	);
 	const pageStart = $derived.by(() =>
@@ -180,8 +182,9 @@
 				<thead>
 					<tr>
 						<th>Skill</th>
+						<th>Registries</th>
 						<th>Priority</th>
-						<th>Weekly Installs</th>
+						<th>Total Installs</th>
 						<th>Severity</th>
 						<th>Confidence</th>
 						<th>Signals</th>
@@ -199,15 +202,37 @@
 								<p class="table-subtext">{skill.title}</p>
 							</td>
 							<td>
+								<div class="token-list">
+									{#each skill.sources as source}
+										<span class="token">{source}</span>
+									{/each}
+								</div>
+							</td>
+							<td>
 								<span class="badge" data-level={priorityTone(skill.priorityScore)}>
 									{skill.priorityScore}
 								</span>
 								<p class="table-subtext">impact {skill.impactScore}</p>
 							</td>
 							<td>
-								<strong class="mono">{formatWeeklyInstalls(skill.currentWeeklyInstalls)}</strong>
+								<strong class="mono">
+									{formatWeeklyInstalls(skill.currentTotalInstalls ?? skill.currentWeeklyInstalls)}
+								</strong>
 								<p class="table-subtext">
-									{installTrendLabel(skill.weeklyInstallsDelta)} · {formatObservedAt(skill.currentWeeklyInstallsObservedAt)}
+									{#if skill.installBreakdown.length > 0}
+										{skill.installBreakdown
+											.map(
+												(entry: SkillSummary['installBreakdown'][number]) =>
+													`${entry.sourceName} ${formatWeeklyInstalls(entry.weeklyInstalls)}`
+											)
+											.join(' · ')}
+									{:else}
+										{installTrendLabel(skill.weeklyInstallsDelta)}
+									{/if}
+									{' · '}
+									{formatObservedAt(
+										skill.currentTotalInstallsObservedAt ?? skill.currentWeeklyInstallsObservedAt
+									)}
 								</p>
 							</td>
 							<td>

@@ -78,6 +78,9 @@ async def test_repository_records_latest_installs_and_history(tmp_path) -> None:
     assert detail["current_weekly_installs"] == 1500
     assert detail["current_registry_rank"] == 3
     assert detail["current_weekly_installs_observed_at"] == second_observed_at.isoformat()
+    assert detail["current_total_installs"] == 1500
+    assert detail["current_total_installs_observed_at"] == second_observed_at.isoformat()
+    assert detail["source_entries"] == []
     assert [row["weekly_installs"] for row in observations] == [1200, 1500]
     assert [row["registry_rank"] for row in observations] == [4, 3]
 

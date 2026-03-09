@@ -13,10 +13,12 @@ import type {
 	RiskFinding,
 	RiskReport,
 	SkillDetail,
+	SkillSourceEntry,
 	SkillPage,
 	SkillIndicatorLink,
 	SkillSnapshot,
 	SkillSummary,
+	SourceInstallBreakdown,
 	VTQueueItem,
 	VTQueueStatus
 } from '$lib/types';
@@ -154,10 +156,19 @@ function normalizeSkillSummary(raw: Record<string, unknown>): SkillSummary {
 		currentWeeklyInstallsObservedAt: raw.current_weekly_installs_observed_at
 			? String(raw.current_weekly_installs_observed_at)
 			: null,
+		currentTotalInstalls: normalizeMaybeNumber(raw.current_total_installs),
+		currentTotalInstallsObservedAt: raw.current_total_installs_observed_at
+			? String(raw.current_total_installs_observed_at)
+			: null,
 		peakWeeklyInstalls: normalizeMaybeNumber(raw.peak_weekly_installs),
 		weeklyInstallsDelta: normalizeMaybeNumber(raw.weekly_installs_delta),
 		impactScore: Number(raw.impact_score ?? 0),
 		priorityScore: Number(raw.priority_score ?? 0),
+		sourceCount: Number(raw.source_count ?? 0),
+		sources: Array.isArray(raw.sources) ? raw.sources.map(String) : [],
+		installBreakdown: Array.isArray(raw.install_breakdown)
+			? raw.install_breakdown.map((item) => normalizeInstallBreakdown(item as Record<string, unknown>))
+			: [],
 		latestSnapshot: normalizeSnapshot(raw.latest_snapshot as Record<string, unknown>)
 	};
 }
@@ -187,6 +198,39 @@ function normalizeInstallHistoryEntry(raw: Record<string, unknown>): InstallHist
 		weeklyInstalls: normalizeMaybeNumber(raw.weekly_installs),
 		registryRank: normalizeMaybeNumber(raw.registry_rank),
 		observationKind: String(raw.observation_kind ?? ''),
+		rawPayload:
+			raw.raw_payload && typeof raw.raw_payload === 'object'
+				? (raw.raw_payload as Record<string, unknown>)
+				: null
+	};
+}
+
+function normalizeInstallBreakdown(raw: Record<string, unknown>): SourceInstallBreakdown {
+	return {
+		sourceName: String(raw.source_name ?? ''),
+		weeklyInstalls: normalizeMaybeNumber(raw.weekly_installs),
+		sourceUrl: String(raw.source_url ?? ''),
+		registryRank: normalizeMaybeNumber(raw.registry_rank)
+	};
+}
+
+function normalizeSourceEntry(raw: Record<string, unknown>): SkillSourceEntry {
+	return {
+		id: Number(raw.id ?? 0),
+		registrySourceId: Number(raw.registry_source_id ?? 0),
+		sourceName: String(raw.source_name ?? ''),
+		sourceBaseUrl: String(raw.source_base_url ?? ''),
+		sourceUrl: String(raw.source_url ?? ''),
+		sourceNativeId: raw.source_native_id ? String(raw.source_native_id) : null,
+		currentRegistrySyncRunId: normalizeMaybeNumber(raw.current_registry_sync_run_id),
+		currentRegistrySyncObservedAt: raw.current_registry_sync_observed_at
+			? String(raw.current_registry_sync_observed_at)
+			: null,
+		view: String(raw.view ?? 'all-time'),
+		weeklyInstalls: normalizeMaybeNumber(raw.weekly_installs),
+		registryRank: normalizeMaybeNumber(raw.registry_rank),
+		firstSeenAt: raw.first_seen_at ? String(raw.first_seen_at) : null,
+		lastSeenAt: raw.last_seen_at ? String(raw.last_seen_at) : null,
 		rawPayload:
 			raw.raw_payload && typeof raw.raw_payload === 'object'
 				? (raw.raw_payload as Record<string, unknown>)
@@ -343,6 +387,9 @@ export async function loadSkillDetail(
 			: [],
 		installHistory: Array.isArray(raw.install_history)
 			? raw.install_history.map((item) => normalizeInstallHistoryEntry(item as Record<string, unknown>))
+			: [],
+		sourceEntries: Array.isArray(raw.source_entries)
+			? raw.source_entries.map((item) => normalizeSourceEntry(item as Record<string, unknown>))
 			: []
 	};
 }
