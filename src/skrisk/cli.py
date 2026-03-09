@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import click
 import uvicorn
@@ -15,6 +16,7 @@ from skrisk.scheduler import next_scan_time
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
 from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
+from skrisk.services.repo_analysis import MirroredRepoAnalysisService, default_worker_count
 from skrisk.services.search_index import SearchIndexService, build_skill_document
 from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySnapshot, RegistrySyncService, SkillsShClient
@@ -210,6 +212,48 @@ def scan_due_command(limit_repos: int) -> None:
         )
 
     from skrisk.analysis.analyzer import SkillAnalyzer
+
+    asyncio.run(_run())
+
+
+@cli.command("analyze-mirrors")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--workers", type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def analyze_mirrors_command(limit_repos: int, workers: int | None, continuous: bool) -> None:
+    """Analyze already-mirrored repos with process-based parallelism."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        resolved_workers = workers or default_worker_count()
+
+        def report(payload: dict[str, int | str]) -> None:
+            click.echo(
+                "Progress "
+                f"{payload['batch_completed']}/{payload['batch_size']} in batch; "
+                f"repos_analyzed={payload['repos_analyzed']} "
+                f"repos_failed={payload['repos_failed']} "
+                f"skills_analyzed={payload['skills_analyzed']} "
+                f"last={payload['last_repo']}"
+            )
+
+        summary = await MirroredRepoAnalysisService(
+            session_factory=session_factory,
+            mirror_root=settings.mirror_root,
+            progress_callback=report,
+        ).run_once(
+            limit_repos=limit_repos,
+            workers=resolved_workers,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Analyzed {summary['repos_analyzed']} repos and {summary['skills_analyzed']} skills "
+            f"(requested={summary['repos_requested']}, missing_mirror={summary['repos_missing_mirror']}, "
+            f"failed={summary['repos_failed']}, workers={resolved_workers})"
+        )
 
     asyncio.run(_run())
 

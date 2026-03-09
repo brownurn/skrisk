@@ -7,7 +7,7 @@ import ipaddress
 import re
 from urllib.parse import urlparse
 
-from skrisk.analysis.deobfuscator import decode_base64_segments
+from skrisk.analysis.language_extractors import expand_text_variants, extract_bare_domains
 
 _URL_RE = re.compile(r"https?://[^\s\"')>]+", re.IGNORECASE)
 _PROMPT_PATTERNS = (
@@ -75,7 +75,8 @@ class SkillAnalyzer:
         indicators: list[ExtractedIndicator] = []
 
         for path, original_text in files.items():
-            expanded = decode_base64_segments(original_text)
+            variants = expand_text_variants(original_text)
+            expanded = "\n".join(text for _, text in variants)
             expanded_lowered = expanded.lower()
 
             for marker in _PROMPT_PATTERNS:
@@ -103,13 +104,13 @@ class SkillAnalyzer:
                     )
                     break
 
-            if expanded != original_text:
+            if len(variants) > 1:
                 findings.append(
                     Finding(
                         path=path,
                         category="obfuscation",
                         severity="high",
-                        evidence="Base64-decoded payload surfaced during analysis",
+                        evidence="Decoded or reconstructed payload surfaced during analysis",
                     )
                 )
 
@@ -130,33 +131,46 @@ class SkillAnalyzer:
                         )
                     )
 
-            for match in _URL_RE.finditer(expanded):
-                url = _normalize_url_token(match.group(0))
-                if not url:
-                    continue
-                indicators.append(
-                    ExtractedIndicator(
-                        path=path,
-                        indicator_type="url",
-                        indicator_value=url,
-                        extraction_kind="inline-url",
-                        raw_value=url,
-                    )
-                )
-                try:
-                    hostname = urlparse(url).hostname
-                except ValueError:
-                    continue
-                if hostname:
-                    normalized_hostname = hostname.lower()
-                    domains.add(normalized_hostname)
+            for variant_kind, variant_text in variants:
+                for match in _URL_RE.finditer(variant_text):
+                    url = _normalize_url_token(match.group(0))
+                    if not url:
+                        continue
                     indicators.append(
                         ExtractedIndicator(
                             path=path,
-                            indicator_type=_host_indicator_type(normalized_hostname),
-                            indicator_value=normalized_hostname,
-                            extraction_kind="url-host",
-                            raw_value=url,
+                            indicator_type="url",
+                            indicator_value=url,
+                            extraction_kind=_url_extraction_kind(variant_kind),
+                            raw_value=match.group(0),
+                        )
+                    )
+                    try:
+                        hostname = urlparse(url).hostname
+                    except ValueError:
+                        continue
+                    if hostname:
+                        normalized_hostname = hostname.lower()
+                        domains.add(normalized_hostname)
+                        indicators.append(
+                            ExtractedIndicator(
+                                path=path,
+                                indicator_type=_host_indicator_type(normalized_hostname),
+                                indicator_value=normalized_hostname,
+                                extraction_kind="url-host",
+                                raw_value=url,
+                            )
+                        )
+
+                for domain in extract_bare_domains(variant_text):
+                    domains.add(domain)
+                    indicators.append(
+                        ExtractedIndicator(
+                            path=path,
+                            indicator_type=_host_indicator_type(domain),
+                            indicator_value=domain,
+                            extraction_kind=_domain_extraction_kind(variant_kind),
+                            raw_value=domain,
                         )
                     )
 
@@ -241,6 +255,18 @@ def _normalize_url_token(raw_value: str) -> str:
     if "](" in value:
         value = value.split("](", 1)[0]
     return value.rstrip("],.;:")
+
+
+def _url_extraction_kind(variant_kind: str) -> str:
+    if variant_kind == "original":
+        return "inline-url"
+    return f"{variant_kind}-url"
+
+
+def _domain_extraction_kind(variant_kind: str) -> str:
+    if variant_kind == "original":
+        return "bare-domain"
+    return f"{variant_kind}-domain"
 
 
 def _dedupe_indicators(indicators: list[ExtractedIndicator]) -> list[ExtractedIndicator]:

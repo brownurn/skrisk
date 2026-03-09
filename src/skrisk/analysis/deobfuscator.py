@@ -18,9 +18,8 @@ def _is_printable(decoded: bytes) -> bool:
     return printable_count / len(decoded) >= 0.9
 
 
-def decode_base64_segments(text: str) -> str:
-    """Append any printable Base64-decoded payloads to the original text."""
-
+def extract_base64_segments(text: str) -> list[str]:
+    """Return unique printable Base64-decoded payloads found in the text."""
     decoded_segments: list[str] = []
 
     for match in _BASE64_RE.finditer(text):
@@ -41,8 +40,14 @@ def decode_base64_segments(text: str) -> str:
         if decoded_text and decoded_text not in decoded_segments:
             decoded_segments.append(decoded_text)
 
+    return decoded_segments
+
+
+def decode_base64_segments(text: str) -> str:
+    """Append any printable Base64-decoded payloads to the original text."""
+
+    decoded_segments = extract_base64_segments(text)
     if not decoded_segments:
         return text
 
     return f"{text}\n" + "\n".join(decoded_segments)
-
