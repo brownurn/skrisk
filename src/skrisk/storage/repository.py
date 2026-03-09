@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+import ipaddress
 from typing import Any
 
 from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select
@@ -417,6 +418,22 @@ class SkillRepository:
             await session.commit()
             await session.refresh(row)
             return row.id
+
+    async def indicator_has_completed_enrichment(
+        self,
+        *,
+        indicator_id: int,
+        provider: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            result = await session.scalar(
+                select(func.count())
+                .select_from(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id == indicator_id)
+                .where(IndicatorEnrichment.provider == provider)
+                .where(IndicatorEnrichment.status == "completed")
+            )
+            return bool(result)
 
     async def enqueue_vt_lookup(
         self,
@@ -935,6 +952,95 @@ class SkillRepository:
                 for row in rows
             ]
 
+    async def list_infrastructure_candidates(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        async with self._session_factory() as session:
+            link_count = func.count(func.distinct(SkillIndicatorLink.id))
+            observation_count = func.count(func.distinct(IndicatorObservation.id))
+            new_link_count = func.sum(
+                case((SkillIndicatorLink.is_new_in_snapshot.is_(True), 1), else_=0)
+            )
+            max_risk_score = func.max(
+                cast(func.json_extract(SkillSnapshot.risk_report, "$.score"), Integer)
+            )
+            result = await session.execute(
+                select(
+                    Indicator,
+                    link_count.label("link_count"),
+                    observation_count.label("observation_count"),
+                    new_link_count.label("new_link_count"),
+                    max_risk_score.label("max_risk_score"),
+                )
+                .outerjoin(SkillIndicatorLink, SkillIndicatorLink.indicator_id == Indicator.id)
+                .outerjoin(SkillSnapshot, SkillSnapshot.id == SkillIndicatorLink.skill_snapshot_id)
+                .outerjoin(IndicatorObservation, IndicatorObservation.indicator_id == Indicator.id)
+                .where(Indicator.indicator_type.in_(("domain", "ip")))
+                .group_by(Indicator.id)
+                .having(link_count > 0)
+                .order_by(
+                    observation_count.desc(),
+                    max_risk_score.desc().nulls_last(),
+                    new_link_count.desc().nulls_last(),
+                    link_count.desc(),
+                    Indicator.id.asc(),
+                )
+                .limit(max(limit * 5, limit))
+            )
+            indicator_rows = result.all()
+            indicator_ids = [indicator.id for indicator, *_ in indicator_rows]
+            if not indicator_ids:
+                return []
+
+            enrichment_result = await session.execute(
+                select(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
+                .order_by(IndicatorEnrichment.id.asc())
+            )
+            completed_providers_by_indicator: dict[int, set[str]] = defaultdict(set)
+            for enrichment in enrichment_result.scalars().all():
+                if enrichment.status == "completed":
+                    completed_providers_by_indicator[enrichment.indicator_id].add(enrichment.provider)
+
+            candidates: list[dict[str, Any]] = []
+            for (
+                indicator,
+                linked_skill_count,
+                matched_observation_count,
+                new_indicator_count,
+                max_indicator_risk_score,
+            ) in indicator_rows:
+                if _is_low_signal_infrastructure_indicator(
+                    indicator_type=indicator.indicator_type,
+                    indicator_value=indicator.indicator_value,
+                ):
+                    continue
+                completed_providers = completed_providers_by_indicator.get(indicator.id, set())
+                if indicator.indicator_type == "domain" and {
+                    "local_dns",
+                    "mewhois",
+                }.issubset(completed_providers):
+                    continue
+                if indicator.indicator_type == "ip" and "meip" in completed_providers:
+                    continue
+                candidates.append(
+                    {
+                        "id": indicator.id,
+                        "indicator_type": indicator.indicator_type,
+                        "indicator_value": indicator.indicator_value,
+                        "completed_providers": sorted(completed_providers),
+                        "linked_skill_count": int(linked_skill_count or 0),
+                        "matched_observation_count": int(matched_observation_count or 0),
+                        "new_indicator_count": int(new_indicator_count or 0),
+                        "max_risk_score": int(max_indicator_risk_score or 0),
+                    }
+                )
+                if len(candidates) >= limit:
+                    break
+            return candidates
+
     async def get_vt_queue_status(
         self,
         *,
@@ -1393,6 +1499,26 @@ class SkillRepository:
                     .where(SkillIndicatorLink.skill_snapshot_id == latest_snapshot.id)
                     .order_by(SkillIndicatorLink.id.asc())
                 )
+                link_rows = link_result.all()
+                indicator_ids = [indicator.id for _, indicator in link_rows]
+                enrichments_by_indicator: dict[int, list[dict[str, Any]]] = defaultdict(list)
+                if indicator_ids:
+                    enrichment_result = await session.execute(
+                        select(IndicatorEnrichment)
+                        .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
+                        .order_by(IndicatorEnrichment.id.asc())
+                    )
+                    for enrichment in enrichment_result.scalars().all():
+                        enrichments_by_indicator[enrichment.indicator_id].append(
+                            {
+                                "provider": enrichment.provider,
+                                "lookup_key": enrichment.lookup_key,
+                                "status": enrichment.status,
+                                "summary": enrichment.summary,
+                                "archive_relative_path": enrichment.archive_relative_path,
+                                "normalized_payload": enrichment.normalized_payload,
+                            }
+                        )
                 indicator_links = [
                     {
                         "indicator_id": indicator.id,
@@ -1402,8 +1528,9 @@ class SkillRepository:
                         "extraction_kind": link.extraction_kind,
                         "raw_value": link.raw_value,
                         "is_new_in_snapshot": link.is_new_in_snapshot,
+                        "enrichments": enrichments_by_indicator.get(indicator.id, []),
                     }
-                    for link, indicator in link_result.all()
+                    for link, indicator in link_rows
                 ]
 
             return {
@@ -1793,6 +1920,43 @@ def _build_install_breakdown(source_entries: list[dict[str, Any]]) -> list[dict[
         }
         for entry in source_entries
     ]
+
+
+_LOW_SIGNAL_HOSTS = {
+    "localhost",
+    "github.com",
+    "www.github.com",
+    "raw.githubusercontent.com",
+    "api.github.com",
+    "example.com",
+}
+
+
+def _is_low_signal_infrastructure_indicator(
+    *,
+    indicator_type: str,
+    indicator_value: str,
+) -> bool:
+    normalized_value = indicator_value.casefold().strip()
+    if indicator_type == "domain":
+        if normalized_value in _LOW_SIGNAL_HOSTS:
+            return True
+        if normalized_value.endswith(".example.com") or normalized_value.endswith(".example.org"):
+            return True
+        return False
+    if indicator_type == "ip":
+        try:
+            address = ipaddress.ip_address(normalized_value)
+        except ValueError:
+            return False
+        return (
+            address.is_loopback
+            or address.is_private
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_link_local
+        )
+    return False
 
 
 def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str:

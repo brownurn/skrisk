@@ -16,6 +16,8 @@ class Settings:
     skills_sh_base_url: str = "https://skills.sh"
     skillsmp_base_url: str = "https://skillsmp.com"
     skillsmp_api_key: str | None = None
+    mewhois_url: str = "http://127.0.0.1:18191"
+    meip_url: str = "http://127.0.0.1:18190"
     opensearch_url: str = "http://127.0.0.1:9200"
     opensearch_index_name: str = "skrisk-skills"
     neo4j_http_url: str = "http://127.0.0.1:7474"
@@ -42,6 +44,8 @@ def load_settings() -> Settings:
 
     opensearch_port = os.getenv("SKRISK_OPENSEARCH_PORT", "9200")
     neo4j_http_port = os.getenv("SKRISK_NEO4J_HTTP_PORT", "7474")
+    mewhois_port = os.getenv("SKRISK_MEWHOIS_PORT", "18191")
+    meip_port = os.getenv("SKRISK_MEIP_PORT", "18190")
 
     return Settings(
         database_url=os.getenv("SKRISK_DATABASE_URL", "sqlite+aiosqlite:///./skrisk.db"),
@@ -51,6 +55,8 @@ def load_settings() -> Settings:
         skills_sh_base_url=os.getenv("SKRISK_SKILLS_SH_BASE_URL", "https://skills.sh"),
         skillsmp_base_url=os.getenv("SKRISK_SKILLSMP_BASE_URL", "https://skillsmp.com"),
         skillsmp_api_key=os.getenv("SKILLSMP_API_KEY"),
+        mewhois_url=os.getenv("SKRISK_MEWHOIS_URL", f"http://127.0.0.1:{mewhois_port}"),
+        meip_url=os.getenv("SKRISK_MEIP_URL", f"http://127.0.0.1:{meip_port}"),
         opensearch_url=os.getenv("SKRISK_OPENSEARCH_URL", f"http://127.0.0.1:{opensearch_port}"),
         opensearch_index_name=os.getenv("SKRISK_OPENSEARCH_INDEX_NAME", "skrisk-skills"),
         neo4j_http_url=os.getenv("SKRISK_NEO4J_HTTP_URL", f"http://127.0.0.1:{neo4j_http_port}"),

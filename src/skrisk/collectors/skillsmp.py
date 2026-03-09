@@ -66,17 +66,24 @@ class SkillsMpClient:
         query: str,
         *,
         page: int = 1,
+        page_size: int = 100,
         client: httpx.AsyncClient | None = None,
     ) -> SkillsMpSearchPage:
         normalized_query = _normalize_query(query)
         if client is None:
             async with httpx.AsyncClient(timeout=self._timeout) as managed_client:
-                return await self.fetch_search_page(normalized_query, page=page, client=managed_client)
+                return await self.fetch_search_page(
+                    normalized_query,
+                    page=page,
+                    page_size=page_size,
+                    client=managed_client,
+                )
 
         response = await self._get_with_retry(
             client,
             query=normalized_query,
             page=page,
+            page_size=page_size,
         )
         response.raise_for_status()
         return self.parse_search_payload(response.json())
@@ -86,9 +93,10 @@ class SkillsMpClient:
         query: str,
         *,
         page: int = 1,
+        page_size: int = 100,
         client: httpx.AsyncClient | None = None,
     ) -> SkillsMpSearchPage:
-        return await self.fetch_search_page(query, page=page, client=client)
+        return await self.fetch_search_page(query, page=page, page_size=page_size, client=client)
 
     def parse_search_payload(self, payload: dict[str, Any]) -> SkillsMpSearchPage:
         data = payload.get("data") or {}
@@ -154,12 +162,13 @@ class SkillsMpClient:
         *,
         query: str,
         page: int,
+        page_size: int,
     ) -> httpx.Response:
         url = f"{self._base_url}/api/v1/skills/search"
         for attempt in range(_MAX_RETRIES + 1):
             response = await client.get(
                 url,
-                params={"q": query, "page": page},
+                params={"q": query, "page": page, "limit": page_size},
                 headers=self.request_headers(),
             )
             if response.status_code not in _RETRYABLE_STATUS_CODES:

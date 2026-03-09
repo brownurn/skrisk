@@ -13,6 +13,7 @@ from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
+from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
 from skrisk.services.search_index import SearchIndexService, build_skill_document
 from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
@@ -63,7 +64,8 @@ def init_dirs() -> None:
 )
 @click.option("--query", type=str)
 @click.option("--page", default=1, show_default=True, type=click.IntRange(min=1))
-def sync_registry_command(source_name: str, query: str | None, page: int) -> None:
+@click.option("--page-size", default=None, type=click.IntRange(min=1, max=100))
+def sync_registry_command(source_name: str, query: str | None, page: int, page_size: int | None) -> None:
     """Fetch the public registry and persist the latest snapshots."""
 
     settings = load_settings()
@@ -77,6 +79,7 @@ def sync_registry_command(source_name: str, query: str | None, page: int) -> Non
             source_name=source_name,
             query=query,
             page=page,
+            page_size=page_size,
         )
         loader = GitHubSkillLoader(settings.mirror_root)
         summary = await RegistrySyncService(
@@ -111,7 +114,8 @@ def sync_registry_command(source_name: str, query: str | None, page: int) -> Non
 )
 @click.option("--query", type=str)
 @click.option("--page", default=1, show_default=True, type=click.IntRange(min=1))
-def seed_registry_command(source_name: str, query: str | None, page: int) -> None:
+@click.option("--page-size", default=None, type=click.IntRange(min=1, max=100))
+def seed_registry_command(source_name: str, query: str | None, page: int, page_size: int | None) -> None:
     """Fetch the public registry and seed repo/skill metadata without deep repo analysis."""
 
     settings = load_settings()
@@ -124,6 +128,7 @@ def seed_registry_command(source_name: str, query: str | None, page: int) -> Non
             source_name=source_name,
             query=query,
             page=page,
+            page_size=page_size,
         )
         summary = await RegistrySyncService(
             session_factory=session_factory,
@@ -364,6 +369,34 @@ def enrich_vt_command(limit: int) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@cli.command("enrich-infra")
+@click.option("--limit", default=100, show_default=True, type=click.IntRange(min=1))
+def enrich_infra_command(limit: int) -> None:
+    """Process a bounded batch of infrastructure enrichment lookups."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.archive_root.mkdir(parents=True, exist_ok=True)
+
+        summary = await InfrastructureEnrichmentService(
+            session_factory=session_factory,
+            settings=settings,
+        ).run_once(limit=limit)
+        click.echo(
+            f"{summary['candidates_processed']} infrastructure candidates processed, "
+            f"{summary['whois_completed']} WHOIS, "
+            f"{summary['dns_completed']} DNS, "
+            f"{summary['ip_completed']} IP, "
+            f"{summary['ip_provider_unavailable']} IP skipped unavailable, "
+            f"{summary['failed']} failed"
+        )
+
+    asyncio.run(_run())
+
+
 @cli.command("serve")
 @click.option("--host", default=None, type=str)
 @click.option("--port", default=None, type=int)
@@ -421,6 +454,7 @@ async def _fetch_registry_snapshot(
     source_name: str,
     query: str | None,
     page: int,
+    page_size: int | None,
 ) -> RegistrySnapshot:
     if source_name == "skills.sh":
         return await SkillsShClient(settings.skills_sh_base_url).fetch_snapshot()
@@ -433,7 +467,7 @@ async def _fetch_registry_snapshot(
     search_page = await SkillsMpClient(
         api_key=settings.skillsmp_api_key,
         base_url=settings.skillsmp_base_url,
-    ).fetch_search_page(query, page=page)
+    ).fetch_search_page(query, page=page, page_size=page_size or 100)
     return RegistrySnapshot(
         sitemap_entries=search_page.entries,
         audit_rows=[],

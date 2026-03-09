@@ -38,6 +38,7 @@ skrisk scan-due --limit-repos 100
 skrisk sync-intel --provider abusech
 skrisk sync-registry
 skrisk sync-registry --source skillsmp --query security --page 1
+skrisk enrich-infra --limit 100
 skrisk enrich-vt --limit 25
 skrisk check-runtime
 skrisk index-search --limit 100
@@ -51,6 +52,10 @@ cd frontend
 npm install
 npm run build
 PUBLIC_SKRISK_API_BASE_URL=http://127.0.0.1:8080 npm run dev
+
+# needed for browser-backed SkillsMP discovery
+pip install -e .
+scrapling install
 ```
 
 ## Environment
@@ -61,6 +66,10 @@ SK Risk reads backend settings from the local shell environment or `.envrc`.
 - `VT_APIKEY`: used for selective VirusTotal enrichment
 - `SKILLSMP_API_KEY`: used for authenticated `skillsmp.com` search requests
 - `SKRISK_VT_DAILY_BUDGET`: optional override for the daily VT call budget
+- `SKRISK_MEWHOIS_URL`: optional override for the `mewhois` base URL
+- `SKRISK_MEWHOIS_PORT`: optional tunnel/default port for `mewhois` when `SKRISK_MEWHOIS_URL` is not set
+- `SKRISK_MEIP_URL`: optional override for the `meip` base URL
+- `SKRISK_MEIP_PORT`: optional tunnel/default port for `meip` when `SKRISK_MEIP_URL` is not set
 - `SKRISK_OPENSEARCH_URL`: optional override for the OpenSearch endpoint, default `http://127.0.0.1:9200`
 - `SKRISK_OPENSEARCH_INDEX_NAME`: optional override for the OpenSearch index name
 - `SKRISK_REQUIRE_OPENSEARCH`: set to `1` to fail fast when OpenSearch is unavailable
@@ -112,6 +121,25 @@ Use these two collection paths together:
 - `skrisk sync-skillsmp-discovery https://skillsmp.com/categories/security`
 
 The first path gives structured API metadata. The second path archives HTML and widens discovery through public pages.
+
+Browser-backed discovery uses Scrapling's fetcher runtime. Install project dependencies and run `scrapling install` before using `sync-skillsmp-discovery`.
+
+## Infrastructure Enrichment
+
+SK Risk can enrich extracted domains and IPs through `mewhois`, `meip`, and local DNS resolution:
+
+- `skrisk enrich-infra --limit 100`
+- domains get cached WHOIS context from `mewhois`
+- domains also get local DNS resolution snapshots with resolved IPs
+- resolved and directly extracted IPs get cached IP intelligence from `meip`
+- indicator detail responses and Neo4j projections include those enrichments so skills can be pivoted into registrars, nameservers, resolved IPs, and ASNs
+
+For production Melurna infrastructure, point SK Risk at the shared microservices:
+
+```bash
+SKRISK_MEWHOIS_URL=http://10.23.94.13:8191
+SKRISK_MEIP_URL=http://10.23.94.13:8190
+```
 
 ## Search And Graph Runtime
 
@@ -174,13 +202,14 @@ Current defaults:
 - [skills.sh discovery and crawl model](docs/architecture/skills-sh-discovery-and-crawl.md)
 - [Vendor and enrichment decisions](docs/discussions/2026-03-06-threat-intel-vendors.md)
 - [SkillsMP integration notes](docs/discussions/2026-03-08-skillsmp-integration.md)
+- [SkillsMP live rollout checkpoint](docs/discussions/2026-03-09-skillsmp-live-rollout.md)
 - [SkillsMP multi-registry design](docs/plans/2026-03-08-skillsmp-multiregistry-design.md)
 - [SkillsMP multi-registry implementation plan](docs/plans/2026-03-08-skillsmp-multiregistry-implementation.md)
 
 ## Current Gaps
 
+- SkillsMP still needs ongoing live ingestion work to approach full public coverage because its authenticated API is search-based rather than a bulk export
 - Real source-repo URL resolution still assumes `https://github.com/{publisher}/{repo}` where registry metadata is missing
-- `mewhois`, `meip`, and later enrichment layers such as Merklemap are not wired yet
 - The current storage path is optimized for local bootstrap; the production Postgres/Timescale rollout is documented but not implemented
 
 ## Maintainer
