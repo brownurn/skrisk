@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 
 from skrisk.analysis.analyzer import RiskReport, SkillAnalyzer
-from skrisk.collectors.github import discover_skills_in_checkout, load_skill_files
+from skrisk.collectors.github import compute_folder_hash, discover_skills_in_checkout, load_skill_files
 from skrisk.storage.repository import SkillRepository
 
 
@@ -18,7 +18,9 @@ from skrisk.storage.repository import SkillRepository
 class AnalyzedSkill:
     skill_slug: str
     relative_path: str
-    files: dict[str, str]
+    folder_hash: str
+    skill_text: str
+    referenced_files: list[str]
     report: RiskReport
 
 
@@ -41,7 +43,7 @@ def default_worker_count() -> int:
 def analyze_checkout(*, checkout_root: Path, publisher: str, repo: str) -> AnalyzedCheckout:
     analyzer = SkillAnalyzer()
     commit_sha, default_branch = _checkout_metadata(checkout_root)
-    discovered_skills = discover_skills_in_checkout(checkout_root)
+    discovered_skills = _dedupe_discovered_skills(discover_skills_in_checkout(checkout_root))
     analyzed_skills: list[AnalyzedSkill] = []
 
     for discovered in discovered_skills:
@@ -57,7 +59,9 @@ def analyze_checkout(*, checkout_root: Path, publisher: str, repo: str) -> Analy
             AnalyzedSkill(
                 skill_slug=discovered.slug,
                 relative_path=discovered.relative_path,
-                files=files,
+                folder_hash=compute_folder_hash(files),
+                skill_text=files.get("SKILL.md", ""),
+                referenced_files=sorted(files),
                 report=report,
             )
         )
@@ -71,6 +75,17 @@ def analyze_checkout(*, checkout_root: Path, publisher: str, repo: str) -> Analy
         discovered_skill_count=len(discovered_skills),
         skills=analyzed_skills,
     )
+
+
+def _dedupe_discovered_skills(discovered_skills):
+    unique_skills = []
+    seen_slugs: set[str] = set()
+    for discovered in discovered_skills:
+        if discovered.slug in seen_slugs:
+            continue
+        seen_slugs.add(discovered.slug)
+        unique_skills.append(discovered)
+    return unique_skills
 
 
 class MirroredRepoAnalysisService:
@@ -96,17 +111,17 @@ class MirroredRepoAnalysisService:
             "skills_analyzed": 0,
         }
 
-        while True:
-            due_repos = await self._repository.list_due_repos()
-            candidates, missing_mirror_count = self._candidate_repos(due_repos, limit_repos=limit_repos)
-            if not candidates:
-                summary["repos_missing_mirror"] += missing_mirror_count
-                break
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            while True:
+                due_repos = await self._repository.list_due_repos()
+                candidates, missing_mirror_count = self._candidate_repos(due_repos, limit_repos=limit_repos)
+                if not candidates:
+                    summary["repos_missing_mirror"] += missing_mirror_count
+                    break
 
-            summary["repos_requested"] += len(candidates)
-            summary["repos_missing_mirror"] += missing_mirror_count
-            loop = asyncio.get_running_loop()
-            with ProcessPoolExecutor(max_workers=workers) as executor:
+                summary["repos_requested"] += len(candidates)
+                summary["repos_missing_mirror"] += missing_mirror_count
                 tasks = [
                     asyncio.create_task(
                         self._analyze_candidate(loop, executor, candidate)
@@ -142,8 +157,8 @@ class MirroredRepoAnalysisService:
                         batch_size=len(candidates),
                     )
 
-            if not continuous:
-                break
+                if not continuous:
+                    break
 
         return summary
 
