@@ -40,6 +40,9 @@ class Settings:
 def load_settings() -> Settings:
     """Load runtime settings from environment variables."""
 
+    opensearch_port = os.getenv("SKRISK_OPENSEARCH_PORT", "9200")
+    neo4j_http_port = os.getenv("SKRISK_NEO4J_HTTP_PORT", "7474")
+
     return Settings(
         database_url=os.getenv("SKRISK_DATABASE_URL", "sqlite+aiosqlite:///./skrisk.db"),
         mirror_root=Path(os.getenv("SKRISK_MIRROR_ROOT", "data/mirrors")),
@@ -48,9 +51,9 @@ def load_settings() -> Settings:
         skills_sh_base_url=os.getenv("SKRISK_SKILLS_SH_BASE_URL", "https://skills.sh"),
         skillsmp_base_url=os.getenv("SKRISK_SKILLSMP_BASE_URL", "https://skillsmp.com"),
         skillsmp_api_key=os.getenv("SKILLSMP_API_KEY"),
-        opensearch_url=os.getenv("SKRISK_OPENSEARCH_URL", "http://127.0.0.1:9200"),
+        opensearch_url=os.getenv("SKRISK_OPENSEARCH_URL", f"http://127.0.0.1:{opensearch_port}"),
         opensearch_index_name=os.getenv("SKRISK_OPENSEARCH_INDEX_NAME", "skrisk-skills"),
-        neo4j_http_url=os.getenv("SKRISK_NEO4J_HTTP_URL", "http://127.0.0.1:7474"),
+        neo4j_http_url=os.getenv("SKRISK_NEO4J_HTTP_URL", f"http://127.0.0.1:{neo4j_http_port}"),
         neo4j_database=os.getenv("SKRISK_NEO4J_DATABASE", "neo4j"),
         neo4j_user=os.getenv("SKRISK_NEO4J_USER", "neo4j"),
         neo4j_password=os.getenv("SKRISK_NEO4J_PASSWORD", "skriskneo4j"),
