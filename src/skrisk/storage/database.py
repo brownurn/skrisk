@@ -13,6 +13,8 @@ from skrisk.storage.models import Base
 _LEGACY_SKILLS_COLUMN_MIGRATIONS = {
     "current_weekly_installs": "INTEGER",
     "current_weekly_installs_observed_at": "DATETIME",
+    "current_total_installs": "INTEGER",
+    "current_total_installs_observed_at": "DATETIME",
     "current_registry_rank": "INTEGER",
     "current_registry_sync_run_id": "INTEGER",
 }
@@ -84,3 +86,16 @@ def _run_sqlite_additive_migrations(connection) -> None:
             "ON skill_snapshots (skill_id, id DESC)"
         )
     )
+    if "skill_source_entries" in inspector.get_table_names():
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_skill_source_entries_skill_source "
+                "ON skill_source_entries (skill_id, registry_source_id, id DESC)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_skill_source_entries_skill_last_seen "
+                "ON skill_source_entries (skill_id, last_seen_at DESC, id DESC)"
+            )
+        )

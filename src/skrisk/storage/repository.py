@@ -18,6 +18,7 @@ from skrisk.storage.models import (
     IndicatorObservation,
     IntelFeedArtifact,
     IntelFeedRun,
+    RegistrySource,
     RegistrySyncRun,
     Skill,
     SkillIndicatorLink,
@@ -25,6 +26,7 @@ from skrisk.storage.models import (
     SkillRepo,
     SkillRepoSnapshot,
     SkillSnapshot,
+    SkillSourceEntry,
     VTLookupQueueItem,
 )
 
@@ -81,6 +83,84 @@ class SkillRepository:
                 error_summary=error_summary,
             )
             session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def upsert_registry_source(
+        self,
+        *,
+        name: str,
+        base_url: str,
+    ) -> int:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(RegistrySource).where(RegistrySource.name == name)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = RegistrySource(name=name, base_url=base_url)
+                session.add(row)
+            else:
+                row.base_url = base_url
+
+            await session.commit()
+            await session.refresh(row)
+            return row.id
+
+    async def upsert_skill_source_entry(
+        self,
+        *,
+        skill_id: int,
+        registry_source_id: int,
+        source_url: str,
+        source_native_id: str | None,
+        weekly_installs: int | None,
+        registry_rank: int | None,
+        observed_at: datetime,
+        raw_payload: dict[str, Any] | None,
+    ) -> int:
+        observed_at = _coerce_datetime_utc(observed_at) or datetime.now(UTC)
+        async with self._session_factory() as session:
+            query = select(SkillSourceEntry).where(
+                SkillSourceEntry.skill_id == skill_id,
+                SkillSourceEntry.registry_source_id == registry_source_id,
+            )
+            if source_native_id is not None:
+                query = query.where(SkillSourceEntry.source_native_id == source_native_id)
+            else:
+                query = query.where(
+                    SkillSourceEntry.source_native_id.is_(None),
+                    SkillSourceEntry.source_url == source_url,
+                )
+            result = await session.execute(query)
+            row = result.scalar_one_or_none()
+            if row is None:
+                row = SkillSourceEntry(
+                    skill_id=skill_id,
+                    registry_source_id=registry_source_id,
+                    source_url=source_url,
+                    source_native_id=source_native_id,
+                    weekly_installs=weekly_installs,
+                    registry_rank=registry_rank,
+                    raw_payload=raw_payload,
+                    first_seen_at=observed_at,
+                    last_seen_at=observed_at,
+                )
+                session.add(row)
+            else:
+                row.source_url = source_url
+                row.source_native_id = source_native_id
+                row.weekly_installs = weekly_installs
+                row.registry_rank = registry_rank
+                row.raw_payload = raw_payload
+                first_seen_at = _coerce_datetime_utc(row.first_seen_at) or observed_at
+                last_seen_at = _coerce_datetime_utc(row.last_seen_at) or observed_at
+                row.first_seen_at = min(first_seen_at, observed_at)
+                row.last_seen_at = max(last_seen_at, observed_at)
+
+            await session.flush()
+            await self._recompute_skill_total_installs(session, skill_id=skill_id)
             await session.commit()
             await session.refresh(row)
             return row.id
@@ -722,6 +802,10 @@ class SkillRepository:
                 session,
                 [skill_row.id for skill_row, _, _, _ in rows],
             )
+            source_entries_by_skill = await self._load_source_entries(
+                session,
+                [skill_row.id for skill_row, _, _, _ in rows],
+            )
 
             items = []
             for skill_row, repo_row, snapshot_row, _previous_weekly_installs in rows:
@@ -730,6 +814,7 @@ class SkillRepository:
                     snapshot_row=snapshot_row,
                     observations=observations_by_skill.get(skill_row.id, []),
                 )
+                source_entries = source_entries_by_skill.get(skill_row.id, [])
                 items.append(
                     {
                         "publisher": repo_row.publisher,
@@ -744,6 +829,12 @@ class SkillRepository:
                         "weekly_installs_delta": telemetry["weekly_installs_delta"],
                         "impact_score": telemetry["impact_score"],
                         "priority_score": telemetry["priority_score"],
+                        "current_total_installs": skill_row.current_total_installs,
+                        "current_total_installs_observed_at": _isoformat_datetime(
+                            skill_row.current_total_installs_observed_at
+                        ),
+                        "source_count": len(source_entries),
+                        "sources": [entry["source_name"] for entry in source_entries],
                         "latest_snapshot": (
                             {
                                 "id": snapshot_row.id,
@@ -1037,6 +1128,31 @@ class SkillRepository:
             observations_by_skill[row.skill_id].append(row)
         return dict(observations_by_skill)
 
+    async def _load_source_entries(
+        self,
+        session: AsyncSession,
+        skill_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        if not skill_ids:
+            return {}
+
+        result = await session.execute(
+            select(SkillSourceEntry, RegistrySource)
+            .join(RegistrySource, SkillSourceEntry.registry_source_id == RegistrySource.id)
+            .where(SkillSourceEntry.skill_id.in_(skill_ids))
+            .order_by(
+                SkillSourceEntry.skill_id.asc(),
+                RegistrySource.name.asc(),
+                SkillSourceEntry.id.asc(),
+            )
+        )
+        source_entries_by_skill: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for source_entry, registry_source in result.all():
+            source_entries_by_skill[source_entry.skill_id].append(
+                _serialize_source_entry(source_entry, registry_source)
+            )
+        return dict(source_entries_by_skill)
+
     async def list_due_repos(self, *, now: datetime | None = None) -> list[dict]:
         now = now or datetime.now(UTC)
         async with self._session_factory() as session:
@@ -1139,6 +1255,16 @@ class SkillRepository:
             latest_snapshot = snapshot_result.scalar_one_or_none()
             observations_by_skill = await self._load_registry_observations(session, [skill_row.id])
             observations = observations_by_skill.get(skill_row.id, [])
+            source_entry_result = await session.execute(
+                select(SkillSourceEntry, RegistrySource)
+                .join(RegistrySource, SkillSourceEntry.registry_source_id == RegistrySource.id)
+                .where(SkillSourceEntry.skill_id == skill_row.id)
+                .order_by(RegistrySource.name.asc(), SkillSourceEntry.id.asc())
+            )
+            source_entries = [
+                _serialize_source_entry(source_entry, registry_source)
+                for source_entry, registry_source in source_entry_result.all()
+            ]
             telemetry = _build_install_telemetry(
                 skill_row=skill_row,
                 snapshot_row=latest_snapshot,
@@ -1184,7 +1310,13 @@ class SkillRepository:
                 "current_weekly_installs_observed_at": telemetry[
                     "current_weekly_installs_observed_at"
                 ],
+                "current_total_installs": skill_row.current_total_installs,
+                "current_total_installs_observed_at": _isoformat_datetime(
+                    skill_row.current_total_installs_observed_at
+                ),
                 "current_registry_rank": skill_row.current_registry_rank,
+                "source_count": len(source_entries),
+                "source_entries": source_entries,
                 "peak_weekly_installs": telemetry["peak_weekly_installs"],
                 "weekly_installs_delta": telemetry["weekly_installs_delta"],
                 "impact_score": telemetry["impact_score"],
@@ -1213,6 +1345,32 @@ class SkillRepository:
                     for verdict in verdicts
                 ],
             }
+
+    async def _recompute_skill_total_installs(
+        self,
+        session: AsyncSession,
+        *,
+        skill_id: int,
+    ) -> None:
+        skill = await session.get(Skill, skill_id)
+        if skill is None:
+            return
+
+        result = await session.execute(
+            select(SkillSourceEntry).where(SkillSourceEntry.skill_id == skill_id)
+        )
+        source_entries = result.scalars().all()
+        known_installs = [
+            entry.weekly_installs
+            for entry in source_entries
+            if entry.weekly_installs is not None
+        ]
+        latest_observed_at = max(
+            (_coerce_datetime_utc(entry.last_seen_at) for entry in source_entries),
+            default=None,
+        )
+        skill.current_total_installs = sum(known_installs) if known_installs else None
+        skill.current_total_installs_observed_at = latest_observed_at
 
 
 def _sort_skill_listing(rows: list[dict[str, Any]], *, sort: str | None) -> None:
@@ -1371,6 +1529,25 @@ def _build_install_telemetry(
         "weekly_installs_delta": metrics.install_delta,
         "impact_score": metrics.impact_score,
         "priority_score": metrics.priority_score,
+    }
+
+
+def _serialize_source_entry(
+    source_entry: SkillSourceEntry,
+    registry_source: RegistrySource,
+) -> dict[str, Any]:
+    return {
+        "id": source_entry.id,
+        "registry_source_id": registry_source.id,
+        "source_name": registry_source.name,
+        "source_base_url": registry_source.base_url,
+        "source_url": source_entry.source_url,
+        "source_native_id": source_entry.source_native_id,
+        "weekly_installs": source_entry.weekly_installs,
+        "registry_rank": source_entry.registry_rank,
+        "first_seen_at": _isoformat_datetime(source_entry.first_seen_at),
+        "last_seen_at": _isoformat_datetime(source_entry.last_seen_at),
+        "raw_payload": source_entry.raw_payload,
     }
 
 
