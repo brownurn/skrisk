@@ -258,9 +258,10 @@ def test_seed_registry_cli_supports_skillsmp_search_source(tmp_path, monkeypatch
     monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
     monkeypatch.setenv("SKILLSMP_API_KEY", "test-key")
 
-    async def fake_fetch_search_page(self, query, *, page=1, client=None):
+    async def fake_fetch_search_page(self, query, *, page=1, page_size=100, client=None):
         assert query == "security"
         assert page == 3
+        assert page_size == 100
         return SkillsMpSearchPage(
             query=query,
             page=page,
@@ -319,7 +320,17 @@ def test_seed_registry_cli_supports_skillsmp_search_source(tmp_path, monkeypatch
 
     result = runner.invoke(
         cli,
-        ["seed-registry", "--source", "skillsmp", "--query", "security", "--page", "3"],
+        [
+            "seed-registry",
+            "--source",
+            "skillsmp",
+            "--query",
+            "security",
+            "--page",
+            "3",
+            "--page-size",
+            "100",
+        ],
     )
 
     assert result.exit_code == 0
@@ -335,6 +346,82 @@ def test_sync_registry_cli_requires_query_for_skillsmp_source(tmp_path, monkeypa
 
     assert result.exit_code != 0
     assert "requires --query" in result.output
+
+
+def test_sync_registry_cli_passes_skillsmp_page_size(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    monkeypatch.setenv("SKILLSMP_API_KEY", "test-key")
+    monkeypatch.setenv("SKRISK_MIRROR_ROOT", str(tmp_path / "mirrors"))
+
+    async def fake_fetch_search_page(self, query, *, page=1, page_size=100, client=None):
+        assert query == "security"
+        assert page == 2
+        assert page_size == 100
+        return SkillsMpSearchPage(
+            query=query,
+            page=page,
+            page_size=page_size,
+            total=1,
+            total_pages=1,
+            has_next=False,
+            has_prev=False,
+            total_is_exact=False,
+            entries=[
+                SkillSitemapEntry(
+                    publisher="openclaw",
+                    repo="openclaw",
+                    skill_slug="prose",
+                    url="https://skillsmp.com/skills/openclaw-prose",
+                    source="skillsmp",
+                )
+            ],
+        )
+
+    async def fake_ingest_registry_snapshot(
+        self,
+        *,
+        sitemap_entries,
+        audit_rows,
+        skill_loader,
+        record_directory_fetch=True,
+        total_skills_reported=None,
+        pages_fetched=None,
+        observed_at=None,
+        registry_observation_context_by_skill=None,
+    ):
+        assert len(sitemap_entries) == 1
+        return {
+            "repos_seen": 1,
+            "skills_seen": 1,
+            "skills_failed": 0,
+        }
+
+    monkeypatch.setattr(
+        "skrisk.collectors.skillsmp.SkillsMpClient.fetch_search_page",
+        fake_fetch_search_page,
+    )
+    monkeypatch.setattr(
+        "skrisk.services.sync.RegistrySyncService.ingest_registry_snapshot",
+        fake_ingest_registry_snapshot,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "sync-registry",
+            "--source",
+            "skillsmp",
+            "--query",
+            "security",
+            "--page",
+            "2",
+            "--page-size",
+            "100",
+        ],
+    )
+
+    assert result.exit_code == 0
 
 
 def test_scan_due_cli_uses_tracked_registry_entries(tmp_path, monkeypatch) -> None:

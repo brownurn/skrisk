@@ -21,6 +21,7 @@ async def test_skillsmp_client_normalizes_search_results_and_auth_headers() -> N
         assert request.url.path == "/api/v1/skills/search"
         assert request.url.params["q"] == "prose"
         assert request.url.params["page"] == "1"
+        assert request.url.params["limit"] == "100"
         return httpx.Response(
             200,
             json={
@@ -64,7 +65,7 @@ async def test_skillsmp_client_normalizes_search_results_and_auth_headers() -> N
         page = await SkillsMpClient(
             api_key="test-key",
             base_url="https://skillsmp.com",
-        ).search("prose", page=1, client=client)
+        ).search("prose", page=1, page_size=100, client=client)
 
     assert seen_headers == ["Bearer test-key"]
     assert page.query == "prose"
