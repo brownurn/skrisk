@@ -14,11 +14,7 @@ from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.config import Settings
 
-_SKILL_LINK_RE = re.compile(r"""href=["'](?P<href>[^"']*?/skills/[^"']+)["']""", re.IGNORECASE)
-_LISTING_LINK_RE = re.compile(
-    r"""href=["'](?P<href>[^"']*(?:/categories/[^"']*|/timeline[^"']*|/categories|/timeline|/))["']""",
-    re.IGNORECASE,
-)
+_HREF_RE = re.compile(r"""href=["'](?P<href>[^"']+)["']""", re.IGNORECASE)
 _GITHUB_LINK_RE = re.compile(r"""https://github\.com/[^"'\s<]+""", re.IGNORECASE)
 
 
@@ -184,16 +180,34 @@ class SkillsMpDiscoveryService:
         )
 
     def _extract_skill_links(self, html: str) -> list[str]:
-        return [
-            urljoin(self._settings.skillsmp_base_url, match.group("href"))
-            for match in _SKILL_LINK_RE.finditer(html)
-        ]
+        skill_links: list[str] = []
+        for href in _extract_same_host_links(
+            html=html,
+            base_url=self._settings.skillsmp_base_url,
+        ):
+            path = urlsplit(href).path
+            if "/skills/" not in path:
+                continue
+            skill_links.append(href)
+        return skill_links
 
     def _extract_listing_links(self, html: str) -> list[str]:
-        return [
-            urljoin(self._settings.skillsmp_base_url, match.group("href"))
-            for match in _LISTING_LINK_RE.finditer(html)
-        ]
+        listing_links: list[str] = []
+        for href in _extract_same_host_links(
+            html=html,
+            base_url=self._settings.skillsmp_base_url,
+        ):
+            path = urlsplit(href).path or "/"
+            if path == "/":
+                listing_links.append(href)
+                continue
+            if path == "/categories" or path.startswith("/categories/"):
+                listing_links.append(href)
+                continue
+            if path == "/timeline" or path.startswith("/timeline/"):
+                listing_links.append(href)
+                continue
+        return listing_links
 
     def _normalize_url(self, url: str) -> str:
         normalized = urljoin(f"{self._settings.skillsmp_base_url}/", url)
@@ -227,3 +241,14 @@ def _parse_repo_coordinates(
     if len(path_parts) >= 3:
         return publisher, repo, path_parts[-1]
     return publisher, repo, fallback_slug
+
+
+def _extract_same_host_links(*, html: str, base_url: str) -> list[str]:
+    base_netloc = urlsplit(base_url).netloc.casefold()
+    links: list[str] = []
+    for match in _HREF_RE.finditer(html):
+        href = urljoin(base_url, match.group("href"))
+        if urlsplit(href).netloc.casefold() != base_netloc:
+            continue
+        links.append(href)
+    return links

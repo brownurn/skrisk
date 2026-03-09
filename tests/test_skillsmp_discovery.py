@@ -80,6 +80,7 @@ async def test_skillsmp_discovery_service_crawls_generic_listing_pages(
               <body>
                 <a href="/categories/security">Security</a>
                 <a href="/timeline">Timeline</a>
+                <a href="https://www.reddit.com/user/ignored-link">External</a>
               </body>
             </html>
         """,
