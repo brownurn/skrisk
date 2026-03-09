@@ -150,6 +150,9 @@ class SkillRepository:
                     weekly_installs=weekly_installs,
                     registry_rank=registry_rank,
                     current_registry_sync_run_id=registry_sync_run_id,
+                    current_registry_sync_observed_at=(
+                        observed_at if registry_sync_run_id is not None else None
+                    ),
                     raw_payload=raw_payload,
                     first_seen_at=observed_at,
                     last_seen_at=observed_at,
@@ -165,6 +168,7 @@ class SkillRepository:
                 last_seen_at = _coerce_datetime_utc(row.last_seen_at) or observed_at
                 if observed_at >= last_seen_at and registry_sync_run_id is not None:
                     row.current_registry_sync_run_id = registry_sync_run_id
+                    row.current_registry_sync_observed_at = observed_at
                 row.first_seen_at = min(first_seen_at, observed_at)
                 row.last_seen_at = max(last_seen_at, observed_at)
 
@@ -850,6 +854,7 @@ class SkillRepository:
                         ),
                         "source_count": len(source_entries),
                         "sources": [entry["source_name"] for entry in source_entries],
+                        "install_breakdown": _build_install_breakdown(source_entries),
                         "latest_snapshot": (
                             {
                                 "id": snapshot_row.id,
@@ -984,21 +989,35 @@ class SkillRepository:
             .group_by(SkillSnapshot.skill_id)
             .subquery()
         )
-        ranked_observations = (
+        aggregated_observations = (
             select(
                 SkillRegistryObservation.skill_id.label("skill_id"),
-                SkillRegistryObservation.weekly_installs.label("weekly_installs"),
+                SkillRegistryObservation.observed_at.label("observed_at"),
+                func.sum(SkillRegistryObservation.weekly_installs).label("weekly_installs"),
+                func.max(SkillRegistryObservation.id).label("latest_observation_id"),
+            )
+            .where(SkillRegistryObservation.observation_kind == "directory_fetch")
+            .group_by(
+                SkillRegistryObservation.skill_id,
+                SkillRegistryObservation.observed_at,
+            )
+            .subquery()
+        )
+        ranked_observations = (
+            select(
+                aggregated_observations.c.skill_id,
+                aggregated_observations.c.weekly_installs,
                 func.row_number()
                 .over(
-                    partition_by=SkillRegistryObservation.skill_id,
+                    partition_by=aggregated_observations.c.skill_id,
                     order_by=(
-                        SkillRegistryObservation.observed_at.desc(),
-                        SkillRegistryObservation.id.desc(),
+                        aggregated_observations.c.observed_at.desc(),
+                        aggregated_observations.c.latest_observation_id.desc(),
                     ),
                 )
                 .label("row_number"),
             )
-            .where(SkillRegistryObservation.observation_kind == "directory_fetch")
+            .select_from(aggregated_observations)
             .subquery()
         )
         previous_weekly_installs = (
@@ -1019,7 +1038,10 @@ class SkillRepository:
             Integer,
         )
         confidence_expression = func.json_extract(SkillSnapshot.risk_report, "$.confidence")
-        current_weekly_installs = Skill.current_weekly_installs
+        current_weekly_installs = func.coalesce(
+            Skill.current_total_installs,
+            Skill.current_weekly_installs,
+        )
         previous_weekly_installs_expression = previous_weekly_installs.c.previous_weekly_installs
         growth_expression = case(
             (
@@ -1062,13 +1084,13 @@ class SkillRepository:
             query_stmt = query_stmt.where(severity_expression == severity)
         if min_weekly_installs is not None:
             query_stmt = query_stmt.where(
-                Skill.current_weekly_installs.is_not(None),
-                Skill.current_weekly_installs >= min_weekly_installs,
+                current_weekly_installs.is_not(None),
+                current_weekly_installs >= min_weekly_installs,
             )
         if max_weekly_installs is not None:
             query_stmt = query_stmt.where(
-                Skill.current_weekly_installs.is_not(None),
-                Skill.current_weekly_installs <= max_weekly_installs,
+                current_weekly_installs.is_not(None),
+                current_weekly_installs <= max_weekly_installs,
             )
         normalized_query = (query or "").strip().lower()
         if normalized_query:
@@ -1088,7 +1110,7 @@ class SkillRepository:
         if sort in {None, "priority"}:
             query_stmt = query_stmt.order_by(
                 priority_expression.desc(),
-                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                func.coalesce(current_weekly_installs, -1).desc(),
                 risk_score_expression.desc(),
                 SkillSnapshot.id.desc().nullslast(),
                 Skill.id.desc(),
@@ -1102,7 +1124,7 @@ class SkillRepository:
             )
         elif sort == "installs":
             query_stmt = query_stmt.order_by(
-                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                func.coalesce(current_weekly_installs, -1).desc(),
                 priority_expression.desc(),
                 SkillSnapshot.id.desc().nullslast(),
                 Skill.id.desc(),
@@ -1110,7 +1132,7 @@ class SkillRepository:
         elif sort == "growth":
             query_stmt = query_stmt.order_by(
                 growth_expression.desc(),
-                func.coalesce(Skill.current_weekly_installs, -1).desc(),
+                func.coalesce(current_weekly_installs, -1).desc(),
                 SkillSnapshot.id.desc().nullslast(),
                 Skill.id.desc(),
             )
@@ -1199,7 +1221,10 @@ class SkillRepository:
             if primary_source_entry is not None:
                 return {
                     "weekly_installs": primary_source_entry["weekly_installs"],
-                    "observed_at": _coerce_datetime_utc(primary_source_entry["last_seen_at"]),
+                    "observed_at": _coerce_datetime_utc(
+                        primary_source_entry["current_registry_sync_observed_at"]
+                    )
+                    or _coerce_datetime_utc(primary_source_entry["last_seen_at"]),
                     "registry_rank": primary_source_entry["registry_rank"],
                     "registry_sync_run_id": primary_source_entry["current_registry_sync_run_id"],
                     "view": primary_source_entry["view"],
@@ -1267,7 +1292,10 @@ class SkillRepository:
                             else skill.current_weekly_installs
                         ),
                         "weekly_installs_observed_at": (
-                            _coerce_datetime_utc(primary_source_entry["last_seen_at"])
+                            _coerce_datetime_utc(
+                                primary_source_entry["current_registry_sync_observed_at"]
+                            )
+                            or _coerce_datetime_utc(primary_source_entry["last_seen_at"])
                             if primary_source_entry is not None
                             else _coerce_datetime_utc(skill.current_weekly_installs_observed_at)
                         ),
@@ -1393,6 +1421,8 @@ class SkillRepository:
                 ),
                 "current_registry_rank": skill_row.current_registry_rank,
                 "source_count": len(source_entries),
+                "sources": [entry["source_name"] for entry in source_entries],
+                "install_breakdown": _build_install_breakdown(source_entries),
                 "source_entries": source_entries,
                 "peak_weekly_installs": telemetry["peak_weekly_installs"],
                 "weekly_installs_delta": telemetry["weekly_installs_delta"],
@@ -1585,22 +1615,27 @@ def _build_install_telemetry(
     snapshot_row: SkillSnapshot | None,
     observations: list[SkillRegistryObservation],
 ) -> dict[str, Any]:
-    metric_observations = _select_metric_observations(observations)
+    metric_observations = _aggregate_metric_observations(observations)
     previous_weekly_installs = _previous_weekly_installs(metric_observations)
     peak_weekly_installs = _peak_weekly_installs(metric_observations)
     risk_report = snapshot_row.risk_report if snapshot_row is not None else {}
+    current_weekly_installs = skill_row.current_total_installs
+    current_weekly_installs_observed_at = skill_row.current_total_installs_observed_at
+    if current_weekly_installs is None:
+        current_weekly_installs = skill_row.current_weekly_installs
+        current_weekly_installs_observed_at = skill_row.current_weekly_installs_observed_at
     metrics = compute_priority_metrics(
         risk_score=int((risk_report or {}).get("score") or 0),
         severity=str((risk_report or {}).get("severity") or "none"),
         confidence=(risk_report or {}).get("confidence"),
-        current_weekly_installs=skill_row.current_weekly_installs,
+        current_weekly_installs=current_weekly_installs,
         previous_weekly_installs=previous_weekly_installs,
         peak_weekly_installs=peak_weekly_installs,
     )
     return {
-        "current_weekly_installs": skill_row.current_weekly_installs,
+        "current_weekly_installs": current_weekly_installs,
         "current_weekly_installs_observed_at": _isoformat_datetime(
-            skill_row.current_weekly_installs_observed_at
+            current_weekly_installs_observed_at
         ),
         "peak_weekly_installs": metrics.peak_weekly_installs,
         "weekly_installs_delta": metrics.install_delta,
@@ -1622,6 +1657,9 @@ def _serialize_source_entry(
         "source_url": source_entry.source_url,
         "source_native_id": source_entry.source_native_id,
         "current_registry_sync_run_id": source_entry.current_registry_sync_run_id,
+        "current_registry_sync_observed_at": _isoformat_datetime(
+            source_entry.current_registry_sync_observed_at
+        ),
         "view": registry_sync_run.view if registry_sync_run is not None else "all-time",
         "weekly_installs": source_entry.weekly_installs,
         "registry_rank": source_entry.registry_rank,
@@ -1673,28 +1711,40 @@ def _registry_source_priority(source: str | None) -> int:
     return 99
 
 
-def _select_metric_observations(
+def _aggregate_metric_observations(
     observations: list[SkillRegistryObservation],
-) -> list[SkillRegistryObservation]:
+) -> list[tuple[datetime, int | None]]:
     directory_fetches = [
         row for row in observations if row.observation_kind == "directory_fetch"
     ]
-    return directory_fetches or observations
+    metric_observations = directory_fetches or observations
+    grouped_installs: dict[datetime, list[int | None]] = {}
+    for row in metric_observations:
+        observed_at = _coerce_datetime_utc(row.observed_at)
+        if observed_at is None:
+            continue
+        grouped_installs.setdefault(observed_at, []).append(row.weekly_installs)
+
+    aggregated = []
+    for observed_at in sorted(grouped_installs):
+        installs = [value for value in grouped_installs[observed_at] if value is not None]
+        aggregated.append((observed_at, sum(installs) if installs else None))
+    return aggregated
 
 
 def _previous_weekly_installs(
-    observations: list[SkillRegistryObservation],
+    observations: list[tuple[datetime, int | None]],
 ) -> int | None:
-    for row in reversed(observations[:-1]):
-        if row.weekly_installs is not None:
-            return row.weekly_installs
+    for _, installs in reversed(observations[:-1]):
+        if installs is not None:
+            return installs
     return None
 
 
 def _peak_weekly_installs(
-    observations: list[SkillRegistryObservation],
+    observations: list[tuple[datetime, int | None]],
 ) -> int | None:
-    known_installs = [row.weekly_installs for row in observations if row.weekly_installs is not None]
+    known_installs = [installs for _, installs in observations if installs is not None]
     if not known_installs:
         return None
     return max(known_installs)
@@ -1716,6 +1766,18 @@ def _serialize_install_history(
             "raw_payload": row.raw_payload,
         }
         for row in observations
+    ]
+
+
+def _build_install_breakdown(source_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_name": entry["source_name"],
+            "weekly_installs": entry["weekly_installs"],
+            "source_url": entry["source_url"],
+            "registry_rank": entry["registry_rank"],
+        }
+        for entry in source_entries
     ]
 
 

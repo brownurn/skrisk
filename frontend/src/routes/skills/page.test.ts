@@ -13,10 +13,28 @@ function buildSkill(skillSlug: string, priorityScore: number, installs: number):
 		title: skillSlug,
 		currentWeeklyInstalls: installs,
 		currentWeeklyInstallsObservedAt: '2026-03-07T08:00:00+00:00',
+		currentTotalInstalls: installs,
+		currentTotalInstallsObservedAt: '2026-03-07T08:00:00+00:00',
 		peakWeeklyInstalls: installs,
 		weeklyInstallsDelta: 300,
 		impactScore: 90,
 		priorityScore,
+		sourceCount: 2,
+		sources: ['skills.sh', 'skillsmp'],
+		installBreakdown: [
+			{
+				sourceName: 'skills.sh',
+				weeklyInstalls: installs,
+				sourceUrl: `https://skills.sh/tul-sh/skills/${skillSlug}`,
+				registryRank: 1
+			},
+			{
+				sourceName: 'skillsmp',
+				weeklyInstalls: 0,
+				sourceUrl: `https://skillsmp.com/skills/${skillSlug}`,
+				registryRank: null
+			}
+		],
 		latestSnapshot: {
 			id: 14,
 			versionLabel: 'v1.3.0',
@@ -62,10 +80,13 @@ test('renders the server-provided page of skills with weekly installs', () => {
 	expect(screen.getByRole('heading', { name: 'Skills registry' })).toBeInTheDocument();
 	expect(screen.getByText('Matching skills')).toBeInTheDocument();
 	expect(screen.getByText('241')).toBeInTheDocument();
-	expect(screen.getByRole('columnheader', { name: /weekly installs/i })).toBeInTheDocument();
+	expect(screen.getByRole('columnheader', { name: /installs/i })).toBeInTheDocument();
+	expect(screen.getByRole('columnheader', { name: /registries/i })).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /priority/i })).toBeInTheDocument();
 	expect(screen.getByText('12.0k')).toBeInTheDocument();
 	expect(screen.getByText('94')).toBeInTheDocument();
+	expect(screen.getAllByText('skills.sh').length).toBeGreaterThan(0);
+	expect(screen.getAllByText('skillsmp').length).toBeGreaterThan(0);
 	expect(screen.getByDisplayValue('agent')).toBeInTheDocument();
 
 	const rows = within(container).getAllByRole('row');

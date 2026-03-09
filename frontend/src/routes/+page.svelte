@@ -3,6 +3,10 @@
 	import type { OverviewData } from '$lib/types';
 
 	let { data } = $props<{ data: OverviewData }>();
+
+	function totalInstalls(value: number | null, fallback: number | null): number | null {
+		return value ?? fallback;
+	}
 </script>
 
 <section class="hero">
@@ -75,7 +79,8 @@
 					<thead>
 						<tr>
 							<th>Skill</th>
-							<th>Weekly Installs</th>
+							<th>Registries</th>
+							<th>Total Installs</th>
 							<th>Severity</th>
 							<th>Top Domain</th>
 						</tr>
@@ -91,7 +96,16 @@
 										{skill.publisher}/{skill.repo}/{skill.skillSlug}
 									</a>
 								</td>
-								<td class="mono">{formatWeeklyInstalls(skill.currentWeeklyInstalls)}</td>
+								<td>
+									<div class="token-list">
+										{#each skill.sources as source}
+											<span class="token">{source}</span>
+										{/each}
+									</div>
+								</td>
+								<td class="mono">
+									{formatWeeklyInstalls(totalInstalls(skill.currentTotalInstalls, skill.currentWeeklyInstalls))}
+								</td>
 								<td>
 									<span
 										class="badge"
