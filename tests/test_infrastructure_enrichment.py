@@ -161,3 +161,45 @@ async def test_infrastructure_enrichment_skips_ip_lookups_when_meip_is_unavailab
     assert summary["ip_provider_unavailable"] >= 1
     assert ip_detail is not None
     assert ip_detail["enrichments"] == []
+
+
+@pytest.mark.asyncio
+async def test_infrastructure_candidates_prioritize_observed_domains_and_skip_low_signal_hosts(
+    tmp_path,
+) -> None:
+    settings = Settings(
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'infra-candidates.db'}",
+        archive_root=tmp_path / "archive",
+    )
+    session_factory = create_sqlite_session_factory(settings.database_url)
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+
+    low_signal_id = await repository.upsert_indicator("domain", "localhost")
+    suspicious_id = await repository.upsert_indicator("domain", "bad.example")
+    ip_id = await repository.upsert_indicator("ip", "8.8.8.8")
+
+    feed_run_id = await repository.record_intel_feed_run(
+        provider="abusech",
+        feed_name="threatfox",
+        source_url="https://threatfox-api.abuse.ch",
+        auth_mode="query-key",
+        parser_version="v1",
+        archive_sha256="abc123",
+        archive_size_bytes=10,
+    )
+    await repository.record_indicator_observation(
+        indicator_id=suspicious_id,
+        feed_run_id=feed_run_id,
+        source_provider="abusech",
+        source_feed="threatfox",
+        classification="malicious",
+        confidence_label="high",
+        summary="Known payload host",
+    )
+
+    candidates = await repository.list_infrastructure_candidates(limit=10)
+
+    assert candidates[0]["indicator_value"] == "bad.example"
+    assert all(candidate["indicator_value"] != "localhost" for candidate in candidates)
+    assert any(candidate["indicator_value"] == "8.8.8.8" for candidate in candidates)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+import ipaddress
 from typing import Any
 
 from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select
@@ -957,17 +958,32 @@ class SkillRepository:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         async with self._session_factory() as session:
-            link_count = func.count(SkillIndicatorLink.id)
+            link_count = func.count(func.distinct(SkillIndicatorLink.id))
+            observation_count = func.count(func.distinct(IndicatorObservation.id))
+            new_link_count = func.sum(
+                case((SkillIndicatorLink.is_new_in_snapshot.is_(True), 1), else_=0)
+            )
             result = await session.execute(
-                select(Indicator, link_count.label("link_count"))
+                select(
+                    Indicator,
+                    link_count.label("link_count"),
+                    observation_count.label("observation_count"),
+                    new_link_count.label("new_link_count"),
+                )
                 .outerjoin(SkillIndicatorLink, SkillIndicatorLink.indicator_id == Indicator.id)
+                .outerjoin(IndicatorObservation, IndicatorObservation.indicator_id == Indicator.id)
                 .where(Indicator.indicator_type.in_(("domain", "ip")))
                 .group_by(Indicator.id)
-                .order_by(link_count.desc(), Indicator.id.asc())
+                .order_by(
+                    observation_count.desc(),
+                    new_link_count.desc().nulls_last(),
+                    link_count.desc(),
+                    Indicator.id.asc(),
+                )
                 .limit(max(limit * 5, limit))
             )
             indicator_rows = result.all()
-            indicator_ids = [indicator.id for indicator, _ in indicator_rows]
+            indicator_ids = [indicator.id for indicator, *_ in indicator_rows]
             if not indicator_ids:
                 return []
 
@@ -982,7 +998,12 @@ class SkillRepository:
                     completed_providers_by_indicator[enrichment.indicator_id].add(enrichment.provider)
 
             candidates: list[dict[str, Any]] = []
-            for indicator, linked_skill_count in indicator_rows:
+            for indicator, linked_skill_count, matched_observation_count, new_indicator_count in indicator_rows:
+                if _is_low_signal_infrastructure_indicator(
+                    indicator_type=indicator.indicator_type,
+                    indicator_value=indicator.indicator_value,
+                ):
+                    continue
                 completed_providers = completed_providers_by_indicator.get(indicator.id, set())
                 if indicator.indicator_type == "domain" and {
                     "local_dns",
@@ -998,6 +1019,8 @@ class SkillRepository:
                         "indicator_value": indicator.indicator_value,
                         "completed_providers": sorted(completed_providers),
                         "linked_skill_count": int(linked_skill_count or 0),
+                        "matched_observation_count": int(matched_observation_count or 0),
+                        "new_indicator_count": int(new_indicator_count or 0),
                     }
                 )
                 if len(candidates) >= limit:
@@ -1883,6 +1906,43 @@ def _build_install_breakdown(source_entries: list[dict[str, Any]]) -> list[dict[
         }
         for entry in source_entries
     ]
+
+
+_LOW_SIGNAL_HOSTS = {
+    "localhost",
+    "github.com",
+    "www.github.com",
+    "raw.githubusercontent.com",
+    "api.github.com",
+    "example.com",
+}
+
+
+def _is_low_signal_infrastructure_indicator(
+    *,
+    indicator_type: str,
+    indicator_value: str,
+) -> bool:
+    normalized_value = indicator_value.casefold().strip()
+    if indicator_type == "domain":
+        if normalized_value in _LOW_SIGNAL_HOSTS:
+            return True
+        if normalized_value.endswith(".example.com") or normalized_value.endswith(".example.org"):
+            return True
+        return False
+    if indicator_type == "ip":
+        try:
+            address = ipaddress.ip_address(normalized_value)
+        except ValueError:
+            return False
+        return (
+            address.is_loopback
+            or address.is_private
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_link_local
+        )
+    return False
 
 
 def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str:
