@@ -51,6 +51,35 @@ def test_discover_skills_in_checkout_supports_root_and_plugin_manifest(tmp_path:
     assert {skill.relative_path for skill in discovered} == {".", "plugins/skills/review"}
 
 
+def test_discover_skills_in_checkout_tolerates_string_plugin_entries(tmp_path: Path) -> None:
+    plugin_root = tmp_path / "plugins"
+    (plugin_root / "skills" / "review").mkdir(parents=True)
+    (plugin_root / "skills" / "review" / "SKILL.md").write_text(
+        "---\nname: review\ndescription: plugin skill\n---\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "marketplace.json").write_text(
+        """
+        {
+          "metadata": { "pluginRoot": "./plugins" },
+          "plugins": [
+            "my-plugin",
+            {
+              "name": "my-plugin",
+              "skills": ["./skills/review"]
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    discovered = discover_skills_in_checkout(tmp_path)
+
+    assert [skill.slug for skill in discovered] == ["review"]
+
+
 def test_mirror_repo_snapshot_updates_existing_checkout_to_new_commit(tmp_path: Path) -> None:
     origin = tmp_path / "origin"
     origin.mkdir()

@@ -13,6 +13,11 @@ from skrisk.config import load_settings
 from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
+from skrisk.services.analysis_spool import (
+    AnalysisSpool,
+    AnalysisSpoolIngestService,
+    AnalysisSpoolProducerService,
+)
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
 from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
@@ -253,6 +258,77 @@ def analyze_mirrors_command(limit_repos: int, workers: int | None, continuous: b
             f"Analyzed {summary['repos_analyzed']} repos and {summary['skills_analyzed']} skills "
             f"(requested={summary['repos_requested']}, missing_mirror={summary['repos_missing_mirror']}, "
             f"failed={summary['repos_failed']}, workers={resolved_workers})"
+        )
+
+    asyncio.run(_run())
+
+
+@cli.command("produce-analysis-spool")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--workers", type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def produce_analysis_spool_command(limit_repos: int, workers: int | None, continuous: bool) -> None:
+    """Analyze mirrored repos and spool compact artifacts without writing snapshots."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        resolved_workers = workers or default_worker_count()
+        spool = AnalysisSpool(settings.archive_root)
+
+        def report(payload: dict[str, int | str]) -> None:
+            click.echo(
+                "Progress "
+                f"{payload['batch_completed']}/{payload['batch_size']} in batch; "
+                f"repos_spooled={payload['repos_spooled']} "
+                f"repos_failed={payload['repos_failed']} "
+                f"skills_analyzed={payload['skills_analyzed']} "
+                f"last={payload['last_repo']}"
+            )
+
+        summary = await AnalysisSpoolProducerService(
+            session_factory=session_factory,
+            mirror_root=settings.mirror_root,
+            spool=spool,
+            progress_callback=report,
+        ).run_once(
+            limit_repos=limit_repos,
+            workers=resolved_workers,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Spooled {summary['repos_spooled']} repos and {summary['skills_analyzed']} skills "
+            f"(requested={summary['repos_requested']}, missing_mirror={summary['repos_missing_mirror']}, "
+            f"failed={summary['repos_failed']}, workers={resolved_workers})"
+        )
+
+    asyncio.run(_run())
+
+
+@cli.command("ingest-analysis-spool")
+@click.option("--limit-artifacts", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def ingest_analysis_spool_command(limit_artifacts: int, continuous: bool) -> None:
+    """Persist pending analysis spool artifacts into the database."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_sqlite_session_factory(settings.database_url)
+        await init_db(session_factory)
+        spool = AnalysisSpool(settings.archive_root)
+        summary = await AnalysisSpoolIngestService(
+            session_factory=session_factory,
+            spool=spool,
+        ).run_once(
+            limit_artifacts=limit_artifacts,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Ingested {summary['artifacts_ingested']} analysis artifacts and {summary['skills_ingested']} skills "
+            f"(seen={summary['artifacts_seen']}, failed={summary['artifacts_failed']})"
         )
 
     asyncio.run(_run())
