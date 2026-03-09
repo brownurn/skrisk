@@ -202,6 +202,7 @@ Current defaults:
 - [skills.sh discovery and crawl model](docs/architecture/skills-sh-discovery-and-crawl.md)
 - [Vendor and enrichment decisions](docs/discussions/2026-03-06-threat-intel-vendors.md)
 - [SkillsMP integration notes](docs/discussions/2026-03-08-skillsmp-integration.md)
+- [SkillsMP live rollout checkpoint](docs/discussions/2026-03-09-skillsmp-live-rollout.md)
 - [SkillsMP multi-registry design](docs/plans/2026-03-08-skillsmp-multiregistry-design.md)
 - [SkillsMP multi-registry implementation plan](docs/plans/2026-03-08-skillsmp-multiregistry-implementation.md)
 
