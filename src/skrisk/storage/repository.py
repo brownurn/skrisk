@@ -162,7 +162,8 @@ class SkillRepository:
                 row.source_url = source_url
                 row.source_native_id = source_native_id
                 row.weekly_installs = weekly_installs
-                row.registry_rank = registry_rank
+                if registry_rank is not None:
+                    row.registry_rank = registry_rank
                 row.raw_payload = raw_payload
                 first_seen_at = _coerce_datetime_utc(row.first_seen_at) or observed_at
                 last_seen_at = _coerce_datetime_utc(row.last_seen_at) or observed_at
@@ -218,7 +219,8 @@ class SkillRepository:
                     if current_observed_at is None or incoming_observed_at >= current_observed_at:
                         skill.current_weekly_installs = weekly_installs
                         skill.current_weekly_installs_observed_at = incoming_observed_at
-                        skill.current_registry_rank = registry_rank
+                        if registry_rank is not None or skill.current_registry_rank is None:
+                            skill.current_registry_rank = registry_rank
                         skill.current_registry_sync_run_id = registry_sync_run_id
 
             await session.commit()

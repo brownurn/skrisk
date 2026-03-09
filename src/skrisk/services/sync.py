@@ -283,7 +283,7 @@ class RegistrySyncService:
                     source_url=entry.url,
                     source_native_id=entry.source_native_id,
                     weekly_installs=entry.weekly_installs,
-                    registry_rank=audit_row.rank if audit_row is not None else None,
+                    registry_rank=_source_entry_registry_rank(entry=entry, audit_row=audit_row),
                     registry_sync_run_id=registry_sync_run_ids_by_source_view.get(
                         (entry.source, entry.view)
                     ),
@@ -352,9 +352,11 @@ class RegistrySyncService:
                     observed_at=scan_observed_at,
                     weekly_installs=entry.weekly_installs,
                     registry_rank=(
-                        audit_row.rank
-                        if audit_row is not None
-                        else (scan_attribution_context or {}).get("registry_rank")
+                        _source_entry_registry_rank(
+                            entry=entry,
+                            audit_row=audit_row,
+                            fallback=(scan_attribution_context or {}).get("registry_rank"),
+                        )
                     ),
                     observation_kind="scan_attribution",
                     raw_payload={
@@ -485,7 +487,7 @@ class RegistrySyncService:
                     source_url=entry.url,
                     source_native_id=entry.source_native_id,
                     weekly_installs=entry.weekly_installs,
-                    registry_rank=audit_row.rank if audit_row is not None else None,
+                    registry_rank=_source_entry_registry_rank(entry=entry, audit_row=audit_row),
                     registry_sync_run_id=registry_sync_run_ids_by_source_view.get(
                         (entry.source, entry.view)
                     ),
@@ -516,7 +518,7 @@ class RegistrySyncService:
                     repo_snapshot_id=None,
                     observed_at=observed_at,
                     weekly_installs=entry.weekly_installs,
-                    registry_rank=audit_row.rank if audit_row is not None else None,
+                    registry_rank=_source_entry_registry_rank(entry=entry, audit_row=audit_row),
                     observation_kind="directory_fetch",
                     raw_payload={
                         "publisher": entry.publisher,
@@ -608,6 +610,17 @@ def _registry_base_url(source: str, url: str) -> str:
     if split_url.scheme and split_url.netloc:
         return f"{split_url.scheme}://{split_url.netloc}"
     return url
+
+
+def _source_entry_registry_rank(
+    *,
+    entry: SkillSitemapEntry,
+    audit_row: AuditRow | None,
+    fallback: object | None = None,
+) -> int | None:
+    if entry.source == "skills.sh" and audit_row is not None:
+        return audit_row.rank
+    return fallback if isinstance(fallback, int) else None
 
 
 def _coerce_datetime_utc(value: object | None) -> datetime | None:
