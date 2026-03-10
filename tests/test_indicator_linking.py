@@ -80,7 +80,7 @@ async def test_ingest_local_checkout_links_extracted_indicators_and_confirms_abu
 
     assert risk_report["severity"] == "critical"
     assert risk_report["confidence"] == "confirmed"
-    assert risk_report["behavior_score"] >= 40
+    assert risk_report["behavior_score"] >= 35
     assert risk_report["intel_score"] > 0
     assert risk_report["indicator_matches"][0]["indicator_value"] == "bad.example"
     assert queue_items[0]["indicator_value"] == "https://bad.example/install.sh"

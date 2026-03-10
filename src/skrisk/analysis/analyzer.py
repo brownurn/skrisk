@@ -75,6 +75,49 @@ _DECODED_BARE_DOMAIN_VARIANTS = {
     "decoded-charcode",
 }
 _TEXTLIKE_BARE_DOMAIN_FILES = {".json", ".md", ".rst", ".txt", ".yaml", ".yml"}
+_REFERENCE_PATH_MARKERS = (
+    "references/",
+    "reference/",
+    "docs/",
+    "doc/",
+    "examples/",
+    "example/",
+)
+_REFERENCE_FILE_NAMES = {
+    "readme",
+    "readme.md",
+    "api.md",
+    "configuration.md",
+    "patterns.md",
+    "installation.md",
+    "troubleshooting.md",
+    "quickstart.md",
+}
+_ROUTER_CATALOG_MARKERS = (
+    "navigation guide only",
+    "navigation guide",
+    "available skills",
+    "choose the relevant skill",
+    "choose the relevant reference",
+    "load the relevant reference",
+    "load reference files",
+    "catalog of skills",
+    "catalog skill",
+    "router skill",
+    "index of skills",
+)
+_HIGH_RISK_CATEGORIES = {"remote_code_execution", "data_exfiltration"}
+_SHARED_PLATFORM_DOMAINS = {
+    "github.com",
+    "gist.github.com",
+    "raw.githubusercontent.com",
+    "gist.githubusercontent.com",
+    "storage.googleapis.com",
+    "drive.google.com",
+    "dropbox.com",
+    "discord.com",
+    "cdn.discordapp.com",
+}
 
 
 @dataclass(slots=True)
@@ -83,6 +126,7 @@ class Finding:
     category: str
     severity: str
     evidence: str
+    context: str = "direct_operational"
 
 
 @dataclass(slots=True)
@@ -121,8 +165,10 @@ class SkillAnalyzer:
         findings: list[Finding] = []
         domains: set[str] = set()
         indicators: list[ExtractedIndicator] = []
+        router_catalog_skill = _is_router_catalog_skill(skill_slug=skill_slug, files=files)
 
         for path, original_text in files.items():
+            file_context = _classify_file_context(path)
             variants = expand_text_variants(original_text)
             expanded = "\n".join(text for _, text in variants)
             expanded_lowered = expanded.lower()
@@ -133,8 +179,9 @@ class SkillAnalyzer:
                         Finding(
                             path=path,
                             category="prompt_injection",
-                            severity="high",
+                            severity=_finding_severity("prompt_injection", file_context),
                             evidence=marker,
+                            context=file_context,
                         )
                     )
                     break
@@ -146,8 +193,9 @@ class SkillAnalyzer:
                         Finding(
                             path=path,
                             category="remote_code_execution",
-                            severity="critical",
+                            severity=_finding_severity("remote_code_execution", file_context),
                             evidence=match.group(0).strip(),
+                            context=file_context,
                         )
                     )
                     break
@@ -157,8 +205,9 @@ class SkillAnalyzer:
                     Finding(
                         path=path,
                         category="obfuscation",
-                        severity="high",
+                        severity=_finding_severity("obfuscation", file_context),
                         evidence="Decoded or reconstructed payload surfaced during analysis",
+                        context=file_context,
                     )
                 )
 
@@ -168,8 +217,9 @@ class SkillAnalyzer:
                     Finding(
                         path=path,
                         category="data_exfiltration",
-                        severity="critical",
+                        severity=_finding_severity("data_exfiltration", file_context),
                         evidence=exfil_evidence,
+                        context=file_context,
                     )
                 )
 
@@ -221,7 +271,7 @@ class SkillAnalyzer:
 
         findings = _dedupe_findings(findings)
         indicators = _dedupe_indicators(indicators)
-        behavior_score = _behavior_score(findings)
+        behavior_score = _behavior_score(findings, router_catalog_skill=router_catalog_skill)
         severity = _severity_from_score(behavior_score)
         score = behavior_score
 
@@ -275,6 +325,7 @@ class SkillAnalyzer:
                     "category": finding.category,
                     "severity": finding.severity,
                     "evidence": finding.evidence,
+                    "context": finding.context,
                 }
                 for finding in report.findings
             ],
@@ -283,10 +334,10 @@ class SkillAnalyzer:
 
 def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
     deduped: list[Finding] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
 
     for finding in findings:
-        key = (finding.path, finding.category, finding.evidence)
+        key = (finding.path, finding.category, finding.evidence, finding.context)
         if key in seen:
             continue
         seen.add(key)
@@ -323,6 +374,39 @@ def _should_extract_bare_domains(*, path: str, variant_kind: str) -> bool:
     if path_obj.name.upper() == "SKILL.MD":
         return True
     return path_obj.suffix.lower() in _TEXTLIKE_BARE_DOMAIN_FILES
+
+
+def _classify_file_context(path: str) -> str:
+    normalized = path.replace("\\", "/").lower()
+    name = Path(normalized).name.lower()
+
+    if any(marker in normalized for marker in _REFERENCE_PATH_MARKERS):
+        return "reference_example"
+    if name in _REFERENCE_FILE_NAMES:
+        return "reference_example"
+    return "direct_operational"
+
+
+def _is_router_catalog_skill(*, skill_slug: str, files: dict[str, str]) -> bool:
+    lowered_slug = skill_slug.lower()
+    if "catalog" in lowered_slug or "router" in lowered_slug:
+        return True
+
+    skill_markdown = files.get("SKILL.md") or files.get("skill.md") or ""
+    lowered = skill_markdown.lower()
+    return any(marker in lowered for marker in _ROUTER_CATALOG_MARKERS)
+
+
+def _finding_severity(category: str, context: str) -> str:
+    if category in _HIGH_RISK_CATEGORIES and context == "reference_example":
+        return "medium"
+    if category == "prompt_injection" and context == "reference_example":
+        return "medium"
+    if category == "obfuscation":
+        return "medium"
+    if category in _HIGH_RISK_CATEGORIES:
+        return "critical"
+    return "high"
 
 
 def _detect_data_exfiltration_evidence(text: str) -> str | None:
@@ -379,14 +463,43 @@ def _dedupe_indicators(indicators: list[ExtractedIndicator]) -> list[ExtractedIn
     return deduped
 
 
-def _behavior_score(findings: list[Finding]) -> int:
+def _behavior_score(findings: list[Finding], *, router_catalog_skill: bool) -> int:
     weights = {
-        "remote_code_execution": 50,
-        "data_exfiltration": 55,
-        "prompt_injection": 15,
-        "obfuscation": 20,
+        ("remote_code_execution", "direct_operational"): 35,
+        ("remote_code_execution", "reference_example"): 5,
+        ("data_exfiltration", "direct_operational"): 55,
+        ("data_exfiltration", "reference_example"): 10,
+        ("prompt_injection", "direct_operational"): 15,
+        ("prompt_injection", "reference_example"): 5,
+        ("obfuscation", "direct_operational"): 8,
+        ("obfuscation", "reference_example"): 5,
     }
-    return min(100, sum(weights.get(finding.category, 10) for finding in findings))
+    group_caps = {
+        ("remote_code_execution", "reference_example"): 5,
+        ("data_exfiltration", "reference_example"): 15,
+        ("prompt_injection", "reference_example"): 5,
+        ("obfuscation", "reference_example"): 8,
+        ("obfuscation", "direct_operational"): 12,
+    }
+
+    group_scores: dict[tuple[str, str], int] = {}
+    for finding in findings:
+        key = (finding.category, finding.context)
+        weight = weights.get(key, 10)
+        next_score = group_scores.get(key, 0) + weight
+        group_scores[key] = min(next_score, group_caps.get(key, 100))
+
+    total = sum(group_scores.values())
+    if router_catalog_skill and not _has_direct_high_risk_finding(findings):
+        total = min(total, 35)
+    return min(100, total)
+
+
+def _has_direct_high_risk_finding(findings: list[Finding]) -> bool:
+    return any(
+        finding.category in _HIGH_RISK_CATEGORIES and finding.context == "direct_operational"
+        for finding in findings
+    )
 
 
 def _intel_score(indicator_matches: list[dict]) -> int:
@@ -416,7 +529,7 @@ def _confidence_label(
     indicator_matches: list[dict],
     severity: str,
 ) -> str:
-    if indicator_matches and severity == "critical" and behavior_score >= 40:
+    if indicator_matches and severity == "critical" and behavior_score >= 35:
         return "confirmed"
     if indicator_matches or behavior_score >= 25:
         return "likely"
@@ -432,14 +545,39 @@ def _host_indicator_type(value: str) -> str:
 
 
 def _is_positive_indicator_match(match: dict) -> bool:
-    return any(_is_positive_observation(observation) for observation in match.get("observations", []))
+    indicator = match.get("indicator", {})
+    indicator_type = (indicator.get("indicator_type") or "").lower()
+    indicator_value = (indicator.get("normalized_value") or indicator.get("indicator_value") or "").lower()
+    return any(
+        _is_positive_observation(
+            observation,
+            indicator_type=indicator_type,
+            indicator_value=indicator_value,
+        )
+        for observation in match.get("observations", [])
+    )
 
 
-def _is_positive_observation(observation: dict) -> bool:
+def _is_positive_observation(
+    observation: dict,
+    *,
+    indicator_type: str = "",
+    indicator_value: str = "",
+) -> bool:
     classification = (observation.get("classification") or "").lower()
     confidence = (observation.get("confidence_label") or "").lower()
     summary = (observation.get("summary") or "").lower()
+    source_provider = (observation.get("source_provider") or "").lower()
+    source_feed = (observation.get("source_feed") or "").lower()
     combined = " ".join(part for part in (classification, summary) if part)
+
+    if (
+        indicator_type == "domain"
+        and indicator_value in _SHARED_PLATFORM_DOMAINS
+        and source_provider == "abusech"
+        and source_feed.startswith("urlhaus")
+    ):
+        return False
 
     if any(
         marker in combined
