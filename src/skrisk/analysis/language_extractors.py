@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import ast
+import base64
+import binascii
 import codecs
 import re
 import textwrap
 from urllib.parse import unquote
 
-from skrisk.analysis.deobfuscator import extract_base64_segments
+import bashlex
+import esprima
+
+from skrisk.analysis.deobfuscator import (
+    extract_base64_segments,
+    extract_hex_segments,
+    extract_powershell_encoded_segments,
+)
 
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}")
@@ -28,35 +37,21 @@ _BARE_DOMAIN_RE = re.compile(
 def expand_text_variants(text: str) -> list[tuple[str, str]]:
     """Return unique decoded/expanded variants of a source text."""
 
-    variants: list[tuple[str, str]] = [("original", text)]
+    variants: list[tuple[str, str]] = []
+    queue: list[tuple[str, str]] = [("original", text)]
+    seen_texts: set[str] = set()
 
-    for decoded in extract_base64_segments(text):
-        _append_variant(variants, "decoded-base64", decoded)
+    while queue and len(variants) < 64:
+        variant_kind, variant_text = queue.pop(0)
+        normalized = variant_text.strip()
+        if not normalized or normalized in seen_texts:
+            continue
+        seen_texts.add(normalized)
+        variants.append((variant_kind, normalized))
 
-    if _PERCENT_ESCAPE_RE.search(text):
-        decoded = unquote(text)
-        if decoded != text:
-            _append_variant(variants, "decoded-percent", decoded)
-
-    if _UNICODE_ESCAPE_RE.search(text):
-        try:
-            decoded = codecs.decode(text, "unicode_escape")
-        except Exception:
-            decoded = text
-        if decoded != text:
-            _append_variant(variants, "decoded-unicode", decoded)
-
-    for decoded in _extract_charcode_segments(text):
-        _append_variant(variants, "decoded-charcode", decoded)
-
-    for reconstructed in _extract_python_strings(text):
-        _append_variant(variants, "python-structure", reconstructed)
-
-    for reconstructed in _extract_javascript_strings(text):
-        _append_variant(variants, "javascript-structure", reconstructed)
-
-    for reconstructed in _extract_shell_strings(text):
-        _append_variant(variants, "shell-structure", reconstructed)
+        for next_kind, next_value in _expand_once(variant_text):
+            if next_value.strip() and next_value.strip() not in seen_texts:
+                queue.append((next_kind, next_value))
 
     return variants
 
@@ -80,6 +75,46 @@ def _append_variant(variants: list[tuple[str, str]], kind: str, value: str) -> N
     if any(existing == normalized for _, existing in variants):
         return
     variants.append((kind, normalized))
+
+
+def _expand_once(text: str) -> list[tuple[str, str]]:
+    expanded: list[tuple[str, str]] = []
+
+    for decoded in extract_base64_segments(text):
+        _append_variant(expanded, "decoded-base64", decoded)
+
+    for decoded in extract_hex_segments(text):
+        _append_variant(expanded, "decoded-hex", decoded)
+
+    for decoded in extract_powershell_encoded_segments(text):
+        _append_variant(expanded, "decoded-powershell", decoded)
+
+    if _PERCENT_ESCAPE_RE.search(text):
+        decoded = unquote(text)
+        if decoded != text:
+            _append_variant(expanded, "decoded-percent", decoded)
+
+    if _UNICODE_ESCAPE_RE.search(text):
+        try:
+            decoded = codecs.decode(text, "unicode_escape")
+        except Exception:
+            decoded = text
+        if decoded != text:
+            _append_variant(expanded, "decoded-unicode", decoded)
+
+    for decoded in _extract_charcode_segments(text):
+        _append_variant(expanded, "decoded-charcode", decoded)
+
+    for reconstructed in _extract_python_strings(text):
+        _append_variant(expanded, "python-ast", reconstructed)
+
+    for reconstructed in _extract_javascript_strings(text):
+        _append_variant(expanded, "javascript-ast", reconstructed)
+
+    for reconstructed in _extract_shell_strings(text):
+        _append_variant(expanded, "shell-ast", reconstructed)
+
+    return expanded
 
 
 def _extract_charcode_segments(text: str) -> list[str]:
@@ -106,7 +141,7 @@ def _extract_charcode_segments(text: str) -> list[str]:
 
 class _PythonStringCollector(ast.NodeVisitor):
     def __init__(self) -> None:
-        self._env: dict[str, str] = {}
+        self._env: dict[str, object] = {}
         self.extracted: list[str] = []
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
@@ -120,11 +155,15 @@ class _PythonStringCollector(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         for argument in node.args:
             value = self._eval(argument)
-            if value:
+            if isinstance(value, str) and value:
+                self.extracted.append(value)
+        for keyword in node.keywords:
+            value = self._eval(keyword.value)
+            if isinstance(value, str) and value:
                 self.extracted.append(value)
         self.generic_visit(node)
 
-    def _eval(self, node: ast.AST) -> str | None:
+    def _eval(self, node: ast.AST) -> object | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
         if isinstance(node, ast.Name):
@@ -132,8 +171,19 @@ class _PythonStringCollector(ast.NodeVisitor):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left = self._eval(node.left)
             right = self._eval(node.right)
-            if left is not None and right is not None:
+            if isinstance(left, str) and isinstance(right, str):
                 return left + right
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            left = self._eval(node.left)
+            right = self._eval(node.right)
+            try:
+                if isinstance(left, str):
+                    if isinstance(right, tuple):
+                        return left % right
+                    if isinstance(right, str):
+                        return left % right
+            except Exception:
+                return None
         if isinstance(node, ast.JoinedStr):
             parts: list[str] = []
             for value in node.values:
@@ -141,10 +191,38 @@ class _PythonStringCollector(ast.NodeVisitor):
                     parts.append(value.value)
                 elif isinstance(value, ast.FormattedValue):
                     nested = self._eval(value.value)
-                    if nested is None:
+                    if not isinstance(nested, str):
                         return None
                     parts.append(nested)
             return "".join(parts)
+        if isinstance(node, ast.List | ast.Tuple):
+            items: list[str] = []
+            for element in node.elts:
+                value = self._eval(element)
+                if not isinstance(value, str):
+                    return None
+                items.append(value)
+            return items if isinstance(node, ast.List) else tuple(items)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            target = self._eval(node.func.value)
+            if node.func.attr == "format" and isinstance(target, str):
+                args = [self._eval(argument) for argument in node.args]
+                if any(not isinstance(argument, str) for argument in args):
+                    return None
+                kwargs = {}
+                for keyword in node.keywords:
+                    value = self._eval(keyword.value)
+                    if not isinstance(value, str) or keyword.arg is None:
+                        return None
+                    kwargs[keyword.arg] = value
+                try:
+                    return target.format(*args, **kwargs)
+                except Exception:
+                    return None
+            if node.func.attr == "join" and isinstance(target, str) and node.args:
+                items = self._eval(node.args[0])
+                if isinstance(items, list | tuple) and all(isinstance(item, str) for item in items):
+                    return target.join(items)
         return None
 
 
@@ -159,78 +237,189 @@ def _extract_python_strings(text: str) -> list[str]:
 
 
 def _extract_javascript_strings(text: str) -> list[str]:
-    env: dict[str, str] = {}
-    extracted: list[str] = []
+    try:
+        program = esprima.parseScript(text, tolerant=True)
+    except Exception:
+        return []
 
-    for name, value in _extract_js_assignments(text).items():
-        env[name] = value
-        extracted.append(value)
-
-    for expression in re.findall(r"(?:fetch|axios\.(?:get|post)|XMLHttpRequest\.open)\(([^)]+)\)", text):
-        value = _eval_js_concat(expression, env)
-        if value:
-            extracted.append(value)
-
-    return extracted
+    collector = _JavaScriptStringCollector()
+    collector.visit(program)
+    return collector.extracted
 
 
-def _extract_js_assignments(text: str) -> dict[str, str]:
-    env: dict[str, str] = {}
-    assignment_re = re.compile(
-        r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(.+?);",
-        re.DOTALL,
-    )
-    for name, expression in assignment_re.findall(text):
-        value = _eval_js_concat(expression, env)
-        if value is not None:
-            env[name] = value
-    return env
+class _JavaScriptStringCollector:
+    def __init__(self) -> None:
+        self._env: dict[str, object] = {}
+        self.extracted: list[str] = []
 
+    def visit(self, node) -> None:
+        node_type = getattr(node, "type", None)
+        if node_type == "Program":
+            for statement in node.body:
+                self.visit(statement)
+            return
+        if node_type == "VariableDeclaration":
+            for declaration in node.declarations:
+                self.visit(declaration)
+            return
+        if node_type == "VariableDeclarator":
+            value = self._eval(node.init)
+            if getattr(node.id, "type", None) == "Identifier" and value is not None:
+                self._env[node.id.name] = value
+                if isinstance(value, str):
+                    self.extracted.append(value)
+            return
+        if node_type == "ExpressionStatement":
+            self.visit(node.expression)
+            return
+        if node_type == "CallExpression":
+            self._collect_call(node)
+            for argument in node.arguments:
+                self.visit(argument)
+            return
+        if node_type == "AssignmentExpression":
+            value = self._eval(node.right)
+            if getattr(node.left, "type", None) == "Identifier" and value is not None:
+                self._env[node.left.name] = value
+            return
 
-def _eval_js_concat(expression: str, env: dict[str, str]) -> str | None:
-    parts = [part.strip() for part in expression.split("+")]
-    if len(parts) == 1:
-        return _eval_js_atom(parts[0], env)
-    resolved: list[str] = []
-    for part in parts:
-        value = _eval_js_atom(part, env)
-        if value is None:
+    def _collect_call(self, node) -> None:
+        callee_name = _js_callee_name(node.callee)
+        if callee_name in {"fetch", "axios.get", "axios.post", "axios.put", "axios.delete"}:
+            if node.arguments:
+                value = self._eval(node.arguments[0])
+                if isinstance(value, str):
+                    self.extracted.append(value)
+        if callee_name == "XMLHttpRequest.open" and len(node.arguments) >= 2:
+            value = self._eval(node.arguments[1])
+            if isinstance(value, str):
+                self.extracted.append(value)
+
+    def _eval(self, node) -> object | None:
+        if node is None:
             return None
-        resolved.append(value)
-    return "".join(resolved)
+        node_type = getattr(node, "type", None)
+        if node_type == "Literal":
+            return node.value if isinstance(node.value, str | int | float) else None
+        if node_type == "Identifier":
+            return self._env.get(node.name)
+        if node_type == "ArrayExpression":
+            values: list[str] = []
+            for element in node.elements:
+                value = self._eval(element)
+                if not isinstance(value, str):
+                    return None
+                values.append(value)
+            return values
+        if node_type == "TemplateLiteral":
+            parts: list[str] = []
+            for index, quasi in enumerate(node.quasis):
+                parts.append(quasi.value.cooked or "")
+                if index < len(node.expressions):
+                    value = self._eval(node.expressions[index])
+                    if not isinstance(value, str):
+                        return None
+                    parts.append(value)
+            return "".join(parts)
+        if node_type == "BinaryExpression" and node.operator == "+":
+            left = self._eval(node.left)
+            right = self._eval(node.right)
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+            return None
+        if node_type == "CallExpression":
+            callee_name = _js_callee_name(node.callee)
+            if callee_name == "atob" and node.arguments:
+                token = self._eval(node.arguments[0])
+                if isinstance(token, str):
+                    try:
+                        return base64.b64decode(token, validate=True).decode("utf-8")
+                    except Exception:
+                        return None
+            if callee_name == "decodeURIComponent" and node.arguments:
+                token = self._eval(node.arguments[0])
+                if isinstance(token, str):
+                    return unquote(token)
+            if callee_name == "String.fromCharCode":
+                values: list[int] = []
+                for argument in node.arguments:
+                    value = self._eval(argument)
+                    if isinstance(value, (int, float)):
+                        values.append(int(value))
+                    else:
+                        return None
+                try:
+                    return "".join(chr(value) for value in values)
+                except ValueError:
+                    return None
+            if getattr(node.callee, "type", None) == "MemberExpression":
+                property_name = _js_property_name(node.callee)
+                if property_name == "join" and node.arguments:
+                    target = self._eval(node.callee.object)
+                    separator = self._eval(node.arguments[0])
+                    if isinstance(target, list) and isinstance(separator, str):
+                        return separator.join(target)
+            return None
+        return None
 
 
-def _eval_js_atom(part: str, env: dict[str, str]) -> str | None:
-    part = part.strip().rstrip(",")
-    if not part:
-        return ""
-    if (part.startswith('"') and part.endswith('"')) or (part.startswith("'") and part.endswith("'")):
-        return part[1:-1]
-    charcode_match = _CHARCODE_RE.fullmatch(part)
-    if charcode_match:
-        joined = _extract_charcode_segments(part)
-        return joined[0] if joined else None
-    return env.get(part)
+def _js_callee_name(node) -> str | None:
+    node_type = getattr(node, "type", None)
+    if node_type == "Identifier":
+        return node.name
+    if node_type == "MemberExpression":
+        object_name = _js_callee_name(node.object)
+        property_name = _js_property_name(node)
+        if property_name is None:
+            return object_name
+        if object_name:
+            return f"{object_name}.{property_name}"
+        return property_name
+    return None
+
+
+def _js_property_name(node) -> str | None:
+    prop = getattr(node, "property", None)
+    if prop is None:
+        return None
+    if getattr(prop, "type", None) == "Identifier":
+        return prop.name
+    if getattr(prop, "type", None) == "Literal" and isinstance(prop.value, str):
+        return prop.value
+    return None
 
 
 def _extract_shell_strings(text: str) -> list[str]:
     env: dict[str, str] = {}
     extracted: list[str] = []
-    for name, dq_value, sq_value in _SHELL_ASSIGNMENT_RE.findall(text):
-        value = dq_value or sq_value
-        env[name] = value
-        extracted.append(value)
+    try:
+        commands = bashlex.parse(text)
+    except Exception:
+        commands = []
 
-    command_re = re.compile(r"(?:curl|wget)\s+([^\n|;]+)")
-    for expression in command_re.findall(text):
-        value = _resolve_shell_expression(expression.strip(), env)
-        if value:
-            extracted.append(value)
+    for command in commands:
+        if command.kind != "command":
+            continue
+        words: list[str] = []
+        for part in getattr(command, "parts", []) or []:
+            if part.kind == "assignment":
+                name, _, raw_value = part.word.partition("=")
+                value = _strip_shell_quotes(_resolve_shell_expression(raw_value, env) or raw_value)
+                env[name] = value
+                extracted.append(value)
+                continue
+            if part.kind == "word":
+                words.append(_resolve_shell_word(part, env))
+        if words and words[0] in {"curl", "wget"}:
+            for word in words[1:]:
+                if word.startswith("http://") or word.startswith("https://"):
+                    extracted.append(word)
     return extracted
 
 
 def _resolve_shell_expression(expression: str, env: dict[str, str]) -> str | None:
-    parts = re.split(r"(\$[A-Za-z_][A-Za-z0-9_]*)", expression)
+    normalized = expression.replace("${", "$").replace("}", "")
+    parts = re.split(r"(\$[A-Za-z_][A-Za-z0-9_]*)", normalized)
     resolved: list[str] = []
     changed = False
     for part in parts:
@@ -246,5 +435,22 @@ def _resolve_shell_expression(expression: str, env: dict[str, str]) -> str | Non
         else:
             resolved.append(part)
     if not changed:
-        return expression
+        return _strip_shell_quotes(expression)
     return "".join(resolved)
+
+
+def _resolve_shell_word(node, env: dict[str, str]) -> str:
+    value = getattr(node, "word", "")
+    resolved = _resolve_shell_expression(value, env)
+    if resolved is None:
+        return _strip_shell_quotes(value)
+    return _strip_shell_quotes(resolved)
+
+
+def _strip_shell_quotes(value: str) -> str:
+    stripped = value.strip()
+    if (stripped.startswith('"') and stripped.endswith('"')) or (
+        stripped.startswith("'") and stripped.endswith("'")
+    ):
+        return stripped[1:-1]
+    return stripped
