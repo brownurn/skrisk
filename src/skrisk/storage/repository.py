@@ -11,6 +11,7 @@ from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from skrisk.analysis.analyzer import SkillAnalyzer
 from skrisk.analysis import compute_priority_metrics
 from skrisk.storage.models import (
     ExternalVerdict,
@@ -389,6 +390,225 @@ class SkillRepository:
             )
             return set(result.scalars().all())
 
+    async def _get_or_create_repo_row(
+        self,
+        session: AsyncSession,
+        *,
+        publisher: str,
+        repo: str,
+        source_url: str,
+    ) -> SkillRepo:
+        result = await session.execute(
+            select(SkillRepo).where(
+                SkillRepo.publisher == publisher,
+                SkillRepo.repo == repo,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = SkillRepo(
+                publisher=publisher,
+                repo=repo,
+                source_url=source_url,
+                next_scan_at=None,
+            )
+            session.add(row)
+            await session.flush()
+            return row
+
+        row.source_url = source_url
+        return row
+
+    async def _load_repo_skills(
+        self,
+        session: AsyncSession,
+        *,
+        repo_id: int,
+    ) -> dict[str, Skill]:
+        result = await session.execute(select(Skill).where(Skill.repo_id == repo_id))
+        return {
+            row.skill_slug: row
+            for row in result.scalars().all()
+        }
+
+    async def _latest_indicator_ids_for_skills(
+        self,
+        session: AsyncSession,
+        *,
+        skill_ids: list[int],
+    ) -> dict[int, set[int]]:
+        if not skill_ids:
+            return {}
+
+        latest_snapshot_subquery = (
+            select(
+                SkillSnapshot.skill_id.label("skill_id"),
+                func.max(SkillSnapshot.id).label("snapshot_id"),
+            )
+            .where(SkillSnapshot.skill_id.in_(skill_ids))
+            .group_by(SkillSnapshot.skill_id)
+            .subquery()
+        )
+        result = await session.execute(
+            select(
+                latest_snapshot_subquery.c.skill_id,
+                SkillIndicatorLink.indicator_id,
+            )
+            .join(
+                SkillIndicatorLink,
+                SkillIndicatorLink.skill_snapshot_id == latest_snapshot_subquery.c.snapshot_id,
+            )
+        )
+        previous_indicator_ids: dict[int, set[int]] = defaultdict(set)
+        for skill_id, indicator_id in result.all():
+            previous_indicator_ids[int(skill_id)].add(int(indicator_id))
+        return previous_indicator_ids
+
+    async def _upsert_indicator_rows(
+        self,
+        session: AsyncSession,
+        *,
+        analyzed_skills,
+        observed_at: datetime,
+    ) -> dict[tuple[str, str], Indicator]:
+        indicator_values_by_key: dict[tuple[str, str], str] = {}
+        normalized_values_by_type: dict[str, set[str]] = defaultdict(set)
+
+        for analyzed_skill in analyzed_skills:
+            for indicator in analyzed_skill.report.indicators:
+                normalized_value = _normalize_indicator_value(
+                    indicator.indicator_type,
+                    indicator.indicator_value,
+                )
+                key = (indicator.indicator_type, normalized_value)
+                indicator_values_by_key[key] = indicator.indicator_value.strip()
+                normalized_values_by_type[indicator.indicator_type].add(normalized_value)
+
+        indicator_rows_by_key: dict[tuple[str, str], Indicator] = {}
+        for indicator_type, normalized_values in normalized_values_by_type.items():
+            if not normalized_values:
+                continue
+            result = await session.execute(
+                select(Indicator).where(
+                    Indicator.indicator_type == indicator_type,
+                    Indicator.normalized_value.in_(sorted(normalized_values)),
+                )
+            )
+            for row in result.scalars().all():
+                indicator_rows_by_key[(row.indicator_type, row.normalized_value)] = row
+
+        for (indicator_type, normalized_value), indicator_value in indicator_values_by_key.items():
+            row = indicator_rows_by_key.get((indicator_type, normalized_value))
+            if row is None:
+                row = Indicator(
+                    indicator_type=indicator_type,
+                    indicator_value=indicator_value,
+                    normalized_value=normalized_value,
+                    first_seen_at=observed_at,
+                    last_seen_at=observed_at,
+                )
+                session.add(row)
+                indicator_rows_by_key[(indicator_type, normalized_value)] = row
+            else:
+                row.indicator_value = indicator_value
+                row.last_seen_at = observed_at
+
+        await session.flush()
+        return indicator_rows_by_key
+
+    async def _load_indicator_observations(
+        self,
+        session: AsyncSession,
+        *,
+        indicator_ids: list[int],
+    ) -> dict[int, list[dict[str, Any]]]:
+        if not indicator_ids:
+            return {}
+
+        result = await session.execute(
+            select(IndicatorObservation)
+            .where(IndicatorObservation.indicator_id.in_(indicator_ids))
+            .order_by(IndicatorObservation.id.asc())
+        )
+        observations_by_indicator_id: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for observation in result.scalars().all():
+            observations_by_indicator_id[observation.indicator_id].append(
+                {
+                    "id": observation.id,
+                    "source_provider": observation.source_provider,
+                    "source_feed": observation.source_feed,
+                    "classification": observation.classification,
+                    "confidence_label": observation.confidence_label,
+                    "summary": observation.summary,
+                }
+            )
+        return observations_by_indicator_id
+
+    def _collect_vt_candidates(
+        self,
+        *,
+        vt_candidates: dict[int, dict[str, Any]],
+        linked_indicators: list[tuple[Any, int]],
+        risk_report: dict[str, Any],
+    ) -> None:
+        if risk_report["severity"] not in {"critical", "high"}:
+            return
+        if risk_report["behavior_score"] < 40 and risk_report["intel_score"] <= 0:
+            return
+
+        priority = 100 if risk_report["severity"] == "critical" else 80
+        seen: set[tuple[str, str]] = set()
+        for indicator, indicator_id in linked_indicators:
+            if indicator.indicator_type not in {"url", "domain", "sha256"}:
+                continue
+            key = (indicator.indicator_type, indicator.indicator_value)
+            if key in seen:
+                continue
+            seen.add(key)
+            existing = vt_candidates.get(indicator_id)
+            if existing is None:
+                vt_candidates[indicator_id] = {
+                    "priority": priority,
+                    "reason": f"{risk_report['severity']}-skill",
+                }
+            else:
+                existing["priority"] = max(existing["priority"], priority)
+                existing["reason"] = f"{risk_report['severity']}-skill"
+
+    async def _upsert_vt_queue_items(
+        self,
+        session: AsyncSession,
+        *,
+        vt_candidates: dict[int, dict[str, Any]],
+    ) -> None:
+        if not vt_candidates:
+            return
+
+        result = await session.execute(
+            select(VTLookupQueueItem).where(
+                VTLookupQueueItem.indicator_id.in_(list(vt_candidates)),
+                VTLookupQueueItem.status.in_(("queued", "running")),
+            )
+        )
+        existing_rows = {
+            row.indicator_id: row
+            for row in result.scalars().all()
+        }
+        for indicator_id, candidate in vt_candidates.items():
+            row = existing_rows.get(indicator_id)
+            if row is None:
+                session.add(
+                    VTLookupQueueItem(
+                        indicator_id=indicator_id,
+                        priority=candidate["priority"],
+                        reason=candidate["reason"],
+                        status="queued",
+                    )
+                )
+            else:
+                row.priority = max(row.priority, candidate["priority"])
+                row.reason = candidate["reason"]
+
     async def record_indicator_enrichment(
         self,
         *,
@@ -645,6 +865,150 @@ class SkillRepository:
             await session.commit()
             await session.refresh(row)
             return row.id
+
+    async def persist_repo_analysis(
+        self,
+        *,
+        publisher: str,
+        repo: str,
+        source_url: str,
+        analyzed_checkout,
+        registry_urls: dict[str, str],
+        scan_interval_hours: int = 72,
+    ) -> int:
+        analyzer = SkillAnalyzer()
+        scanned_at = datetime.now(UTC)
+
+        async with self._session_factory() as session:
+            repo_row = await self._get_or_create_repo_row(
+                session,
+                publisher=publisher,
+                repo=repo,
+                source_url=source_url,
+            )
+            repo_snapshot = SkillRepoSnapshot(
+                repo_id=repo_row.id,
+                commit_sha=analyzed_checkout.commit_sha,
+                default_branch=analyzed_checkout.default_branch,
+                discovered_skill_count=analyzed_checkout.discovered_skill_count,
+            )
+            session.add(repo_snapshot)
+            await session.flush()
+
+            skill_rows_by_slug = await self._load_repo_skills(session, repo_id=repo_row.id)
+            for analyzed_skill in analyzed_checkout.skills:
+                registry_url = registry_urls[analyzed_skill.skill_slug]
+                skill_row = skill_rows_by_slug.get(analyzed_skill.skill_slug)
+                if skill_row is None:
+                    skill_row = Skill(
+                        repo_id=repo_row.id,
+                        skill_slug=analyzed_skill.skill_slug,
+                        title=analyzed_skill.skill_slug,
+                        relative_path=analyzed_skill.relative_path,
+                        registry_url=registry_url,
+                    )
+                    session.add(skill_row)
+                    skill_rows_by_slug[analyzed_skill.skill_slug] = skill_row
+                else:
+                    skill_row.title = analyzed_skill.skill_slug
+                    skill_row.relative_path = analyzed_skill.relative_path
+                    if _should_replace_registry_url(
+                        existing_url=skill_row.registry_url,
+                        incoming_url=registry_url,
+                        incoming_source=_registry_source_from_url(registry_url),
+                    ):
+                        skill_row.registry_url = registry_url
+            await session.flush()
+
+            previous_indicator_ids = await self._latest_indicator_ids_for_skills(
+                session,
+                skill_ids=[row.id for row in skill_rows_by_slug.values()],
+            )
+            indicator_rows_by_key = await self._upsert_indicator_rows(
+                session,
+                analyzed_skills=analyzed_checkout.skills,
+                observed_at=scanned_at,
+            )
+            observations_by_indicator_id = await self._load_indicator_observations(
+                session,
+                indicator_ids=[row.id for row in indicator_rows_by_key.values()],
+            )
+            vt_candidates: dict[int, dict[str, Any]] = {}
+
+            for analyzed_skill in analyzed_checkout.skills:
+                skill_row = skill_rows_by_slug[analyzed_skill.skill_slug]
+                linked_indicators = []
+                indicator_matches: dict[tuple[str, str], dict[str, Any]] = {}
+
+                for indicator in analyzed_skill.report.indicators:
+                    normalized_value = _normalize_indicator_value(
+                        indicator.indicator_type,
+                        indicator.indicator_value,
+                    )
+                    indicator_row = indicator_rows_by_key[
+                        (indicator.indicator_type, normalized_value)
+                    ]
+                    linked_indicators.append((indicator, indicator_row.id))
+                    observations = observations_by_indicator_id.get(indicator_row.id, [])
+                    if not observations:
+                        continue
+                    indicator_matches[
+                        (indicator_row.indicator_type, indicator_row.normalized_value)
+                    ] = {
+                        "indicator": {
+                            "id": indicator_row.id,
+                            "indicator_type": indicator_row.indicator_type,
+                            "indicator_value": indicator_row.indicator_value,
+                            "normalized_value": indicator_row.normalized_value,
+                        },
+                        "observations": observations,
+                    }
+
+                risk_report = analyzer.build_risk_report(
+                    report=analyzed_skill.report,
+                    indicator_matches=list(indicator_matches.values()),
+                )
+                skill_snapshot = SkillSnapshot(
+                    skill_id=skill_row.id,
+                    repo_snapshot_id=repo_snapshot.id,
+                    folder_hash=analyzed_skill.folder_hash,
+                    version_label=f"{analyzed_checkout.default_branch}@{analyzed_checkout.commit_sha}",
+                    skill_text=analyzed_skill.skill_text,
+                    referenced_files=analyzed_skill.referenced_files,
+                    extracted_domains=analyzed_skill.report.domains,
+                    risk_report=risk_report,
+                )
+                session.add(skill_snapshot)
+                await session.flush()
+
+                for indicator, indicator_id in linked_indicators:
+                    session.add(
+                        SkillIndicatorLink(
+                            skill_snapshot_id=skill_snapshot.id,
+                            indicator_id=indicator_id,
+                            source_path=indicator.path,
+                            extraction_kind=indicator.extraction_kind,
+                            raw_value=indicator.raw_value,
+                            is_new_in_snapshot=indicator_id
+                            not in previous_indicator_ids.get(skill_row.id, set()),
+                        )
+                    )
+
+                self._collect_vt_candidates(
+                    vt_candidates=vt_candidates,
+                    linked_indicators=linked_indicators,
+                    risk_report=risk_report,
+                )
+
+            await self._upsert_vt_queue_items(
+                session,
+                vt_candidates=vt_candidates,
+            )
+
+            repo_row.last_scanned_at = scanned_at
+            repo_row.next_scan_at = scanned_at + timedelta(hours=scan_interval_hours)
+            await session.commit()
+            return repo_snapshot.id
 
     async def record_repo_snapshot(
         self,
@@ -968,7 +1332,7 @@ class SkillRepository:
                 case((SkillIndicatorLink.is_new_in_snapshot.is_(True), 1), else_=0)
             )
             max_risk_score = func.max(
-                cast(func.json_extract(SkillSnapshot.risk_report, "$.score"), Integer)
+                _json_integer(SkillSnapshot.risk_report, "score")
             )
             result = await session.execute(
                 select(
@@ -1142,14 +1506,14 @@ class SkillRepository:
         )
 
         severity_expression = func.coalesce(
-            func.json_extract(SkillSnapshot.risk_report, "$.severity"),
+            _json_string(SkillSnapshot.risk_report, "severity"),
             "none",
         )
-        risk_score_expression = cast(
-            func.coalesce(func.json_extract(SkillSnapshot.risk_report, "$.score"), 0),
-            Integer,
+        risk_score_expression = func.coalesce(
+            _json_integer(SkillSnapshot.risk_report, "score"),
+            0,
         )
-        confidence_expression = func.json_extract(SkillSnapshot.risk_report, "$.confidence")
+        confidence_expression = _json_string(SkillSnapshot.risk_report, "confidence")
         current_weekly_installs = func.coalesce(
             Skill.current_total_installs,
             Skill.current_weekly_installs,
@@ -1482,10 +1846,6 @@ class SkillRepository:
                 _serialize_source_entry(source_entry, registry_source, registry_sync_run)
                 for source_entry, registry_source, registry_sync_run in source_entry_result.all()
             ]
-            source_entries = _resolved_source_entries(
-                skill_row=skill_row,
-                source_entries=source_entries,
-            )
             telemetry = _build_install_telemetry(
                 skill_row=skill_row,
                 snapshot_row=latest_snapshot,
@@ -1689,15 +2049,15 @@ def _impact_score_sql(*, current_weekly_installs, previous_weekly_installs):
         ),
         (
             previous_weekly_installs <= 0,
-            func.min(
-                100,
+            _clamp_max_sql(
                 base_score
                 + case((current_weekly_installs > 0, 20), else_=0),
+                100,
             ),
         ),
-        (ratio_expression >= 2, func.min(100, base_score + 20)),
-        (ratio_expression >= 1.1, func.min(100, base_score + 10)),
-        (ratio_expression <= 0.5, func.max(0, base_score - 10)),
+        (ratio_expression >= 2, _clamp_max_sql(base_score + 20, 100)),
+        (ratio_expression >= 1.1, _clamp_max_sql(base_score + 10, 100)),
+        (ratio_expression <= 0.5, _clamp_min_sql(base_score - 10, 0)),
         else_=base_score,
     )
 
@@ -1718,17 +2078,33 @@ def _priority_score_sql(*, risk_score, severity, confidence, impact_score):
         else_=1.0,
     )
     return func.round(
-        func.min(
-            100,
-            func.max(
-                0,
+        _clamp_max_sql(
+            _clamp_min_sql(
                 risk_score
                 * severity_multiplier
                 * confidence_multiplier
                 * (1 + (impact_score / 200.0)),
+                0,
             ),
+            100,
         )
     )
+
+
+def _clamp_min_sql(expression, minimum):
+    return case((expression < minimum, minimum), else_=expression)
+
+
+def _clamp_max_sql(expression, maximum):
+    return case((expression > maximum, maximum), else_=expression)
+
+
+def _json_string(column, key: str):
+    return column[key].as_string()
+
+
+def _json_integer(column, key: str):
+    return cast(column[key].as_string(), Integer)
 
 
 def _sort_weekly_installs_value(value: int | None) -> int:

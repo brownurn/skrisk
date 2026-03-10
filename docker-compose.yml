@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16.8
+    container_name: skrisk-postgres
+    environment:
+      POSTGRES_DB: skrisk
+      POSTGRES_USER: skrisk
+      POSTGRES_PASSWORD: skrisk
+    ports:
+      - "${SKRISK_POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skrisk -d skrisk"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   opensearch:
     image: opensearchproject/opensearch:2.19.1
     container_name: skrisk-opensearch
@@ -32,6 +49,7 @@ services:
       - neo4j-logs:/logs
 
 volumes:
+  postgres-data:
   opensearch-data:
   neo4j-data:
   neo4j-logs:

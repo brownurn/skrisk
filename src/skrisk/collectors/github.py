@@ -223,7 +223,14 @@ def _plugin_manifest_skill_paths(root: Path) -> set[str]:
         plugin_root = payload.get("metadata", {}).get("pluginRoot", ".")
         plugins = payload.get("plugins", [])
         for plugin in plugins:
-            for raw_skill_path in plugin.get("skills", []):
+            if not isinstance(plugin, dict):
+                continue
+            raw_skill_paths = plugin.get("skills", [])
+            if not isinstance(raw_skill_paths, list):
+                continue
+            for raw_skill_path in raw_skill_paths:
+                if not isinstance(raw_skill_path, str):
+                    continue
                 resolved = (root / plugin_root / raw_skill_path).resolve()
                 try:
                     discovered.add(resolved.relative_to(root.resolve()).as_posix())

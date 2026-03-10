@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 
 import click
 import uvicorn
@@ -12,14 +14,21 @@ from skrisk.config import load_settings
 from skrisk.collectors.skills_sh import SkillSitemapEntry
 from skrisk.collectors.skillsmp import SkillsMpClient
 from skrisk.scheduler import next_scan_time
+from skrisk.services.analysis_spool import (
+    AnalysisSpool,
+    AnalysisSpoolIngestService,
+    AnalysisSpoolProducerService,
+)
+from skrisk.services.db_migrate import DatabaseMigrationService
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
 from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
+from skrisk.services.repo_analysis import MirroredRepoAnalysisService, default_worker_count
 from skrisk.services.search_index import SearchIndexService, build_skill_document
 from skrisk.services.skillsmp_discovery import SkillsMpDiscoveryService
 from skrisk.services.sync import GitHubSkillLoader, RegistrySnapshot, RegistrySyncService, SkillsShClient
 from skrisk.services.vt_triage import VTTriageService
-from skrisk.storage.database import create_sqlite_session_factory, init_db
+from skrisk.storage.database import create_session_factory, init_db
 from skrisk.storage.repository import SkillRepository
 
 
@@ -40,9 +49,40 @@ def init_db_command() -> None:
     """Create the configured database tables."""
 
     settings = load_settings()
-    session_factory = create_sqlite_session_factory(settings.database_url)
+    session_factory = create_session_factory(settings.database_url)
     asyncio.run(init_db(session_factory))
     click.echo(f"Initialized database at {settings.database_url}")
+
+
+@cli.command("migrate-sqlite-to-postgres")
+@click.option("--source-sqlite-path", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=True)
+@click.option("--reset-target/--no-reset-target", default=False, show_default=True)
+@click.option("--batch-size", default=1000, show_default=True, type=click.IntRange(min=1))
+def migrate_sqlite_to_postgres_command(
+    source_sqlite_path: Path,
+    reset_target: bool,
+    batch_size: int,
+) -> None:
+    """Copy the current SQLite corpus into the configured Postgres database."""
+
+    settings = load_settings()
+    if not settings.database_url.startswith(("postgresql://", "postgresql+asyncpg://", "postgres://")):
+        raise click.ClickException("SKRISK_DATABASE_URL must point to Postgres for this migration")
+
+    async def _run() -> None:
+        summary = await DatabaseMigrationService(
+            target_database_url=settings.database_url,
+        ).migrate_from_sqlite(
+            source_sqlite_path=source_sqlite_path,
+            reset_target=reset_target,
+            batch_size=batch_size,
+        )
+        click.echo(
+            f"Copied {summary['rows_copied']} rows across {summary['tables_copied']} tables "
+            f"from {source_sqlite_path} into {settings.database_url}"
+        )
+
+    asyncio.run(_run())
 
 
 @cli.command("init-dirs")
@@ -71,7 +111,7 @@ def sync_registry_command(source_name: str, query: str | None, page: int, page_s
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.mirror_root.mkdir(parents=True, exist_ok=True)
         snapshot = await _fetch_registry_snapshot(
@@ -121,7 +161,7 @@ def seed_registry_command(source_name: str, query: str | None, page: int, page_s
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         snapshot = await _fetch_registry_snapshot(
             settings=settings,
@@ -158,7 +198,7 @@ def scan_due_command(limit_repos: int) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.mirror_root.mkdir(parents=True, exist_ok=True)
 
@@ -214,6 +254,119 @@ def scan_due_command(limit_repos: int) -> None:
     asyncio.run(_run())
 
 
+@cli.command("analyze-mirrors")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--workers", type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def analyze_mirrors_command(limit_repos: int, workers: int | None, continuous: bool) -> None:
+    """Analyze already-mirrored repos with process-based parallelism."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_session_factory(settings.database_url)
+        await init_db(session_factory)
+        resolved_workers = workers or default_worker_count()
+
+        def report(payload: dict[str, int | str]) -> None:
+            click.echo(
+                "Progress "
+                f"{payload['batch_completed']}/{payload['batch_size']} in batch; "
+                f"repos_analyzed={payload['repos_analyzed']} "
+                f"repos_failed={payload['repos_failed']} "
+                f"skills_analyzed={payload['skills_analyzed']} "
+                f"last={payload['last_repo']}"
+            )
+
+        summary = await MirroredRepoAnalysisService(
+            session_factory=session_factory,
+            mirror_root=settings.mirror_root,
+            progress_callback=report,
+        ).run_once(
+            limit_repos=limit_repos,
+            workers=resolved_workers,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Analyzed {summary['repos_analyzed']} repos and {summary['skills_analyzed']} skills "
+            f"(requested={summary['repos_requested']}, missing_mirror={summary['repos_missing_mirror']}, "
+            f"failed={summary['repos_failed']}, workers={resolved_workers})"
+        )
+
+    asyncio.run(_run())
+
+
+@cli.command("produce-analysis-spool")
+@click.option("--limit-repos", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--workers", type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def produce_analysis_spool_command(limit_repos: int, workers: int | None, continuous: bool) -> None:
+    """Analyze mirrored repos and spool compact artifacts without writing snapshots."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_session_factory(settings.database_url)
+        await init_db(session_factory)
+        resolved_workers = workers or default_worker_count()
+        spool = AnalysisSpool(settings.archive_root)
+
+        def report(payload: dict[str, int | str]) -> None:
+            click.echo(
+                "Progress "
+                f"{payload['batch_completed']}/{payload['batch_size']} in batch; "
+                f"repos_spooled={payload['repos_spooled']} "
+                f"repos_failed={payload['repos_failed']} "
+                f"skills_analyzed={payload['skills_analyzed']} "
+                f"last={payload['last_repo']}"
+            )
+
+        summary = await AnalysisSpoolProducerService(
+            session_factory=session_factory,
+            mirror_root=settings.mirror_root,
+            spool=spool,
+            progress_callback=report,
+        ).run_once(
+            limit_repos=limit_repos,
+            workers=resolved_workers,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Spooled {summary['repos_spooled']} repos and {summary['skills_analyzed']} skills "
+            f"(requested={summary['repos_requested']}, missing_mirror={summary['repos_missing_mirror']}, "
+            f"failed={summary['repos_failed']}, workers={resolved_workers})"
+        )
+
+    asyncio.run(_run())
+
+
+@cli.command("ingest-analysis-spool")
+@click.option("--limit-artifacts", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--continuous/--no-continuous", default=False, show_default=True)
+def ingest_analysis_spool_command(limit_artifacts: int, continuous: bool) -> None:
+    """Persist pending analysis spool artifacts into the database."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_session_factory(settings.database_url)
+        await init_db(session_factory)
+        spool = AnalysisSpool(settings.archive_root)
+        summary = await AnalysisSpoolIngestService(
+            session_factory=session_factory,
+            spool=spool,
+        ).run_once(
+            limit_artifacts=limit_artifacts,
+            continuous=continuous,
+        )
+        click.echo(
+            f"Ingested {summary['artifacts_ingested']} analysis artifacts and {summary['skills_ingested']} skills "
+            f"(seen={summary['artifacts_seen']}, failed={summary['artifacts_failed']})"
+        )
+
+    asyncio.run(_run())
+
+
 @cli.command("sync-skillsmp-discovery")
 @click.argument("urls", nargs=-1)
 def sync_skillsmp_discovery_command(urls: tuple[str, ...]) -> None:
@@ -225,7 +378,7 @@ def sync_skillsmp_discovery_command(urls: tuple[str, ...]) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.archive_root.mkdir(parents=True, exist_ok=True)
 
@@ -271,7 +424,7 @@ def index_search_command(limit: int) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         repository = SkillRepository(session_factory)
         rows = await repository.list_skills(limit=limit, sort="priority")
@@ -290,7 +443,7 @@ def project_graph_command(limit: int) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         repository = SkillRepository(session_factory)
         rows = await repository.list_skills(limit=limit, sort="priority")
@@ -320,7 +473,7 @@ def sync_intel_command(provider: str) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.archive_root.mkdir(parents=True, exist_ok=True)
 
@@ -349,7 +502,7 @@ def enrich_vt_command(limit: int) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.archive_root.mkdir(parents=True, exist_ok=True)
 
@@ -377,7 +530,7 @@ def enrich_infra_command(limit: int) -> None:
     settings = load_settings()
 
     async def _run() -> None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.archive_root.mkdir(parents=True, exist_ok=True)
 
@@ -416,7 +569,7 @@ def collect_once() -> None:
 
     async def _run() -> None:
         settings = load_settings()
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         settings.mirror_root.mkdir(parents=True, exist_ok=True)
         snapshot = await SkillsShClient(settings.skills_sh_base_url).fetch_snapshot()

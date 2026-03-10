@@ -31,6 +31,7 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 . .venv/bin/activate
 skrisk init-db
 skrisk init-dirs
+skrisk migrate-sqlite-to-postgres --source-sqlite-path ./skrisk.db --reset-target
 skrisk seed-registry
 skrisk seed-registry --source skillsmp --query security --page 1
 skrisk sync-skillsmp-discovery https://skillsmp.com/categories/security
@@ -45,7 +46,7 @@ skrisk index-search --limit 100
 skrisk project-graph --limit 50
 skrisk serve --host 127.0.0.1 --port 8080
 
-docker compose up -d opensearch neo4j
+docker compose up -d postgres opensearch neo4j
 docker compose ps
 
 cd frontend
@@ -66,6 +67,8 @@ SK Risk reads backend settings from the local shell environment or `.envrc`.
 - `VT_APIKEY`: used for selective VirusTotal enrichment
 - `SKILLSMP_API_KEY`: used for authenticated `skillsmp.com` search requests
 - `SKRISK_VT_DAILY_BUDGET`: optional override for the daily VT call budget
+- `SKRISK_DATABASE_URL`: optional override for the system-of-record database. Use `postgresql://skrisk:skrisk@127.0.0.1:15432/skrisk` for the local Docker Postgres service
+- `SKRISK_POSTGRES_PORT`: optional Docker Compose host port override for the bundled Postgres service, default `15432`
 - `SKRISK_MEWHOIS_URL`: optional override for the `mewhois` base URL
 - `SKRISK_MEWHOIS_PORT`: optional tunnel/default port for `mewhois` when `SKRISK_MEWHOIS_URL` is not set
 - `SKRISK_MEIP_URL`: optional override for the `meip` base URL
@@ -143,12 +146,13 @@ SKRISK_MEIP_URL=http://10.23.94.13:8190
 
 ## Search And Graph Runtime
 
-`OpenSearch` and `Neo4j` are now part of the local runtime and are defined in [`docker-compose.yml`](docker-compose.yml).
+`Postgres`, `OpenSearch`, and `Neo4j` are now part of the local runtime and are defined in [`docker-compose.yml`](docker-compose.yml).
 
 Start them with:
 
 ```bash
-docker compose up -d opensearch neo4j
+docker compose up -d postgres opensearch neo4j
+SKRISK_DATABASE_URL=postgresql://skrisk:skrisk@127.0.0.1:15432/skrisk skrisk init-db
 skrisk check-runtime
 ```
 
@@ -158,8 +162,10 @@ If those default ports are already occupied on your machine, override them at st
 SKRISK_OPENSEARCH_PORT=19200 \
 SKRISK_NEO4J_HTTP_PORT=17474 \
 SKRISK_NEO4J_BOLT_PORT=17687 \
-docker compose up -d opensearch neo4j
+SKRISK_POSTGRES_PORT=15433 \
+docker compose up -d postgres opensearch neo4j
 
+SKRISK_DATABASE_URL=postgresql://skrisk:skrisk@127.0.0.1:15433/skrisk \
 SKRISK_OPENSEARCH_URL=http://127.0.0.1:19200 \
 SKRISK_NEO4J_HTTP_URL=http://127.0.0.1:17474 \
 skrisk check-runtime
@@ -178,7 +184,7 @@ Current defaults:
 - Neo4j HTTP: `http://127.0.0.1:7474`
 - Neo4j credentials: `neo4j` / `skriskneo4j`
 
-`SQLite` remains the system of record. `OpenSearch` and `Neo4j` are read-optimized projections of canonical SK Risk data.
+`Postgres` is the system of record. `OpenSearch` and `Neo4j` are read-optimized projections of canonical SK Risk data.
 
 ## Project Structure
 
@@ -210,7 +216,7 @@ Current defaults:
 
 - SkillsMP still needs ongoing live ingestion work to approach full public coverage because its authenticated API is search-based rather than a bulk export
 - Real source-repo URL resolution still assumes `https://github.com/{publisher}/{repo}` where registry metadata is missing
-- The current storage path is optimized for local bootstrap; the production Postgres/Timescale rollout is documented but not implemented
+- Multiple ingesters are not enabled yet; the current spool runtime still uses one ingester process after the Postgres cutover
 
 ## Maintainer
 
