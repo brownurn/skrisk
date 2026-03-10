@@ -6,12 +6,14 @@ import ast
 import base64
 import binascii
 import codecs
+from pathlib import Path
 import re
 import textwrap
 from urllib.parse import unquote
 
 import bashlex
 import esprima
+import tldextract
 
 from skrisk.analysis.deobfuscator import (
     extract_base64_segments,
@@ -25,12 +27,14 @@ _CHARCODE_RE = re.compile(
     r"String\.fromCharCode\(\s*([0-9,\s]+)\s*\)",
     re.IGNORECASE,
 )
+_MARKDOWN_FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
+_MARKDOWN_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _SHELL_ASSIGNMENT_RE = re.compile(
     r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(?:\"([^\"]*)\"|'([^']*)')\s*$",
     re.MULTILINE,
 )
 _BARE_DOMAIN_RE = re.compile(
-    r"(?<![@/A-Za-z0-9_-])((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})(?![A-Za-z0-9_-])"
+    r"(?<![@./A-Za-z0-9_-])((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})(?![A-Za-z0-9_-])"
 )
 _FILELIKE_SUFFIXES = {
     "csv",
@@ -116,6 +120,15 @@ _CODELIKE_SUFFIXES = {
     "wait",
     "write",
 }
+_RESERVED_DOMAIN_SUFFIXES = {
+    "example.com",
+    "example.net",
+    "example.org",
+}
+_LOW_SIGNAL_HOSTS = {
+    "localhost",
+}
+_TEXT_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 def expand_text_variants(text: str) -> list[tuple[str, str]]:
@@ -140,12 +153,13 @@ def expand_text_variants(text: str) -> list[tuple[str, str]]:
     return variants
 
 
-def extract_bare_domains(text: str) -> list[str]:
+def extract_bare_domains(text: str, *, source_path: str | None = None) -> list[str]:
     domains: list[str] = []
     seen: set[str] = set()
-    for match in _BARE_DOMAIN_RE.finditer(text):
+    candidate_text = _prepare_text_for_bare_domains(text, source_path=source_path)
+    for match in _BARE_DOMAIN_RE.finditer(candidate_text):
         value = match.group(1).lower()
-        if _should_ignore_domain_context(text, match.start(1), match.end(1)):
+        if _should_ignore_domain_context(candidate_text, match.start(1), match.end(1)):
             continue
         if _should_ignore_domain_like_token(value):
             continue
@@ -156,12 +170,38 @@ def extract_bare_domains(text: str) -> list[str]:
     return domains
 
 
+def is_meaningful_domain_candidate(value: str) -> bool:
+    return not _should_ignore_domain_like_token(value)
+
+
 def _should_ignore_domain_like_token(value: str) -> bool:
+    lowered = value.lower()
+    if any(token in lowered for token in ("${", "}", "`", "<", ">", "(", ")", "[", "]")):
+        return True
+    if lowered in _LOW_SIGNAL_HOSTS or lowered.endswith(".localhost"):
+        return True
+    if any(lowered == suffix or lowered.endswith(f".{suffix}") for suffix in _RESERVED_DOMAIN_SUFFIXES):
+        return True
+    if lowered.startswith("your-") or ".your-" in lowered:
+        return True
+
     labels = value.split(".")
     if any(not label or label.startswith("-") or label.endswith("-") for label in labels):
         return True
+    if len(labels) == 2 and len(labels[0]) == 1:
+        return True
+
+    extracted = _TEXT_EXTRACTOR(lowered)
+    has_public_suffix = bool(extracted.domain and extracted.suffix)
+
     suffix = value.rsplit(".", 1)[-1]
-    if suffix in _FILELIKE_SUFFIXES or suffix in _CODELIKE_SUFFIXES:
+    if len(labels) == 2 and (_is_code_like_label(labels[0]) or suffix in _FILELIKE_SUFFIXES or suffix in _CODELIKE_SUFFIXES):
+        return True
+    if not has_public_suffix and (suffix in _FILELIKE_SUFFIXES or suffix in _CODELIKE_SUFFIXES):
+        return True
+
+    code_like_label_count = sum(_is_code_like_label(label) for label in labels)
+    if code_like_label_count >= max(2, len(labels) - 1):
         return True
     return False
 
@@ -176,6 +216,55 @@ def _should_ignore_domain_context(text: str, start: int, end: int) -> bool:
     if suffix.startswith(("`", "}", ">")):
         return True
     return False
+
+
+def _prepare_text_for_bare_domains(text: str, *, source_path: str | None) -> str:
+    if source_path is None:
+        return text
+
+    suffix = Path(source_path).suffix.lower()
+    name = Path(source_path).name.lower()
+    if suffix not in {".md", ".markdown", ".mdx", ".rst", ".txt"} and name != "skill.md":
+        return text
+
+    without_fences = _MARKDOWN_FENCE_RE.sub("\n", text)
+    return _MARKDOWN_INLINE_CODE_RE.sub(" ", without_fences)
+
+
+def _is_code_like_label(label: str) -> bool:
+    lowered = label.lower()
+    if lowered in _CODELIKE_SUFFIXES:
+        return True
+    if len(lowered) == 1:
+        return True
+    if any(char.isdigit() for char in lowered) and not lowered.isdigit():
+        return True
+    return any(
+        lowered.startswith(prefix)
+        for prefix in (
+            "arg",
+            "app",
+            "agent",
+            "client",
+            "conn",
+            "controller",
+            "env",
+            "event",
+            "item",
+            "param",
+            "part",
+            "path",
+            "process",
+            "prompt",
+            "question",
+            "response",
+            "result",
+            "sandbox",
+            "sdk",
+            "session",
+            "state",
+        )
+    )
 
 
 def _append_variant(variants: list[tuple[str, str]], kind: str, value: str) -> None:

@@ -252,7 +252,7 @@ def test_analyzer_tolerates_markdown_url_labels_that_embed_links() -> None:
     extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
 
     assert ("url", "https://example.com") in extracted
-    assert ("domain", "example.com") in extracted
+    assert ("domain", "example.com") not in extracted
     assert ("url", "https://second.example/path") in extracted
     assert ("domain", "second.example") in extracted
 
@@ -535,7 +535,71 @@ def test_extract_bare_domains_ignores_placeholders_and_code_tokens() -> None:
     fonts.gstatic.com
     """
 
+    assert extract_bare_domains(text) == ["fonts.gstatic.com"]
+
+
+def test_extract_bare_domains_ignores_two_label_code_tokens_but_keeps_suspicious_hosts() -> None:
+    text = """
+    agent.unparsed
+    item.started
+    skill.md
+    hidden.example
+    cli.inference.sh
+    """
+
     assert extract_bare_domains(text) == [
-        "api.example.com",
-        "fonts.gstatic.com",
+        "hidden.example",
+        "cli.inference.sh",
     ]
+
+
+def test_extract_bare_domains_strips_markdown_code_blocks_and_reserved_hosts() -> None:
+    text = """
+    Canonical URL: https://sandboxagent.dev/docs/building-chat-ui
+    Reserved placeholder: your-sandbox-agent.example.com
+
+    ```ts
+    const claude = agents.find((a) => a.id === "claude");
+    const url = c.req.url;
+    const session = session.id;
+    const provider = process.env.OPENAI_API_KEY;
+    const api = "https://api.openai.com/v1";
+    ```
+
+    Docs live at docs.boxlite.ai and releases.rivet.dev.
+    """
+
+    assert extract_bare_domains(text, source_path="references/building-chat-ui.md") == [
+        "docs.boxlite.ai",
+        "releases.rivet.dev",
+    ]
+
+
+def test_analyzer_does_not_surface_local_or_reserved_hosts_as_domains() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "SKILL.md": """
+        Local preview: http://127.0.0.1:5173
+        Health check: http://localhost:3000/health
+        Placeholder: https://git.example.com/demo
+        Template: https://localhost${path}${query}
+        Placeholder app: https://your-app.com
+        Provider API: https://api.openai.com/v1/responses
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="rivet-dev",
+        repo="skills",
+        skill_slug="sandbox-agent",
+        files=files,
+    )
+
+    extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
+
+    assert report.domains == ["api.openai.com"]
+    assert ("domain", "api.openai.com") in extracted
+    assert ("domain", "localhost") not in extracted
+    assert ("ip", "127.0.0.1") not in extracted
+    assert ("domain", "git.example.com") not in extracted
+    assert ("domain", "your-app.com") not in extracted

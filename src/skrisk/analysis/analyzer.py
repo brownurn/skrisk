@@ -8,7 +8,11 @@ from pathlib import Path
 import re
 from urllib.parse import urlparse
 
-from skrisk.analysis.language_extractors import expand_text_variants, extract_bare_domains
+from skrisk.analysis.language_extractors import (
+    expand_text_variants,
+    extract_bare_domains,
+    is_meaningful_domain_candidate,
+)
 
 _URL_RE = re.compile(r"https?://[^\s\"')>]+", re.IGNORECASE)
 _PROMPT_PATTERNS = (
@@ -117,6 +121,14 @@ _SHARED_PLATFORM_DOMAINS = {
     "dropbox.com",
     "discord.com",
     "cdn.discordapp.com",
+}
+_LOW_SIGNAL_DOMAINS = {
+    "localhost",
+}
+_RESERVED_DOMAIN_SUFFIXES = {
+    "example.com",
+    "example.net",
+    "example.org",
 }
 
 
@@ -243,21 +255,29 @@ class SkillAnalyzer:
                         continue
                     if hostname:
                         normalized_hostname = hostname.lower()
-                        domains.add(normalized_hostname)
-                        indicators.append(
-                            ExtractedIndicator(
-                                path=path,
-                                indicator_type=_host_indicator_type(normalized_hostname),
-                                indicator_value=normalized_hostname,
-                                extraction_kind="url-host",
-                                raw_value=url,
+                        indicator_type = _host_indicator_type(normalized_hostname)
+                        if _should_record_host_indicator(
+                            normalized_hostname,
+                            indicator_type=indicator_type,
+                        ):
+                            if indicator_type == "domain":
+                                domains.add(normalized_hostname)
+                            indicators.append(
+                                ExtractedIndicator(
+                                    path=path,
+                                    indicator_type=indicator_type,
+                                    indicator_value=normalized_hostname,
+                                    extraction_kind="url-host",
+                                    raw_value=url,
+                                )
                             )
-                        )
 
                 if not _should_extract_bare_domains(path=path, variant_kind=variant_kind):
                     continue
 
-                for domain in extract_bare_domains(variant_text):
+                for domain in extract_bare_domains(variant_text, source_path=path):
+                    if not _should_record_host_indicator(domain, indicator_type="domain"):
+                        continue
                     domains.add(domain)
                     indicators.append(
                         ExtractedIndicator(
@@ -542,6 +562,30 @@ def _host_indicator_type(value: str) -> str:
     except ValueError:
         return "domain"
     return "ip"
+
+
+def _should_record_host_indicator(value: str, *, indicator_type: str) -> bool:
+    lowered = value.lower()
+    if indicator_type == "domain":
+        if lowered in _LOW_SIGNAL_DOMAINS or lowered.endswith(".localhost"):
+            return False
+        if any(lowered == suffix or lowered.endswith(f".{suffix}") for suffix in _RESERVED_DOMAIN_SUFFIXES):
+            return False
+        return is_meaningful_domain_candidate(lowered)
+
+    try:
+        ip_value = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+
+    return not (
+        ip_value.is_private
+        or ip_value.is_loopback
+        or ip_value.is_link_local
+        or ip_value.is_multicast
+        or ip_value.is_reserved
+        or ip_value.is_unspecified
+    )
 
 
 def _is_positive_indicator_match(match: dict) -> bool:
