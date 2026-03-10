@@ -13,16 +13,106 @@
 		priorityTone,
 		severityTone
 	} from '$lib/presenters';
-	import type { SkillDetail, SkillIndicatorLink } from '$lib/types';
+	import type { IndicatorMatch, IndicatorObservation, RiskFinding, SkillDetail, SkillIndicatorLink } from '$lib/types';
 
 	let { data } = $props<{ data: { skill: SkillDetail } }>();
 
 	const snapshot = $derived(data.skill.latestSnapshot);
 	const indicatorLinks = $derived(snapshot.indicatorLinks ?? []);
 	const installHistory = $derived(data.skill.installHistory ?? []);
+	const hardFindings = $derived(
+		snapshot.riskReport.findings.filter((finding: RiskFinding) => isHardFinding(finding))
+	);
+	const softFindings = $derived(
+		snapshot.riskReport.findings.filter((finding: RiskFinding) => !isHardFinding(finding))
+	);
+	const positiveIndicatorMatches = $derived(
+		snapshot.riskReport.indicatorMatches.filter((match: IndicatorMatch) =>
+			isPositiveIndicatorMatch(match)
+		)
+	);
+	const observedInfrastructure = $derived.by(() => {
+		const seen = new Set<string>();
+		const resolved: SkillIndicatorLink[] = [];
+		for (const link of indicatorLinks) {
+			if (!link.indicatorType || !link.indicatorValue) {
+				continue;
+			}
+			if (!['domain', 'ip', 'url'].includes(link.indicatorType)) {
+				continue;
+			}
+			const key = `${link.indicatorType}:${link.indicatorValue}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			resolved.push(link);
+			if (resolved.length >= 8) {
+				break;
+			}
+		}
+		return resolved;
+	});
 
 	function linkHref(link: SkillIndicatorLink): string {
 		return buildIndicatorHref(link.indicatorType ?? 'domain', link.indicatorValue ?? '');
+	}
+
+	function titleizeCategory(value: string): string {
+		return value
+			.split('_')
+			.filter(Boolean)
+			.map((part) => part[0].toUpperCase() + part.slice(1))
+			.join(' ');
+	}
+
+	function isPositiveIndicatorMatch(match: IndicatorMatch): boolean {
+		return match.observations.some((observation) => isPositiveObservation(observation));
+	}
+
+	function isHardFinding(finding: RiskFinding): boolean {
+		if (finding.category === 'obfuscation' || finding.category === 'prompt_injection') {
+			return false;
+		}
+
+		return finding.severity === 'critical' || finding.severity === 'high';
+	}
+
+	function isPositiveObservation(observation: IndicatorObservation): boolean {
+		const combined = [observation.classification, observation.summary]
+			.filter((value): value is string => typeof value === 'string' && value.length > 0)
+			.join(' ')
+			.toLowerCase();
+		const confidence = (observation.confidenceLabel ?? '').toLowerCase();
+
+		if (/(benign|harmless|false positive|informational)/.test(combined)) {
+			return false;
+		}
+
+		if (/(malicious|malware|payload|stealer|trojan|botnet|phish|exploit|ransom|c2|download|loader)/.test(combined)) {
+			return true;
+		}
+
+		return confidence === 'high';
+	}
+
+	function indicatorEvidence(match: IndicatorMatch): string {
+		const positiveObservation = match.observations.find((observation) =>
+			isPositiveObservation(observation)
+		);
+		if (!positiveObservation) {
+			return 'Matched external intelligence';
+		}
+		return (
+			positiveObservation.summary ??
+			positiveObservation.classification ??
+			positiveObservation.confidenceLabel ??
+			'Matched external intelligence'
+		);
+	}
+
+	function infrastructureContext(link: SkillIndicatorLink): string {
+		return [link.extractionKind, link.sourcePath].filter(Boolean).join(' · ') || 'Observed in latest snapshot';
 	}
 </script>
 
@@ -140,6 +230,102 @@
 		<p class="metric-label">Findings</p>
 		<p class="metric-value">{snapshot.riskReport.findings.length}</p>
 	</article>
+</section>
+
+<section class="panel-grid page-section">
+	<div class="table-card">
+		<div class="table-header">
+			<div>
+				<p class="table-label">Analyst verdict</p>
+				<h2>Why this skill is flagged</h2>
+			</div>
+		</div>
+
+		{#if hardFindings.length > 0 || positiveIndicatorMatches.length > 0}
+			<div class="definition-grid">
+				<div class="definition-card">
+					<h3>Hard evidence</h3>
+					<ul class="evidence-list">
+						{#each hardFindings as finding}
+							<li>
+								<strong>{titleizeCategory(finding.category)}</strong>
+								<span>{finding.evidence}</span>
+							</li>
+						{/each}
+						{#each positiveIndicatorMatches as match}
+							<li>
+								<strong>{match.indicatorValue}</strong>
+								<span>{indicatorEvidence(match)}</span>
+							</li>
+						{/each}
+					</ul>
+				</div>
+
+				<div class="definition-card">
+					<h3>Supporting signals</h3>
+					<p class="table-subtext">
+						Supporting signals add analyst context but do not, by themselves, prove maliciousness.
+					</p>
+					{#if softFindings.length > 0}
+						<ul class="evidence-list evidence-list--compact">
+							{#each softFindings as finding}
+								<li>
+									<strong>{titleizeCategory(finding.category)}</strong>
+									<span>{finding.evidence}</span>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="muted">No softer static signals were recorded on the latest snapshot.</p>
+					{/if}
+				</div>
+			</div>
+		{:else}
+			<div class="definition-card stack-tight">
+				<h3>No hard evidence recorded</h3>
+				<p>
+					No hard evidence of exfiltration, malware delivery, or covert outbound infrastructure
+					was recorded on the latest snapshot.
+				</p>
+				<p class="muted">
+					Decoded or reconstructed text alone is not treated as malicious. This page separates
+					hard evidence from softer static signals.
+				</p>
+			</div>
+		{/if}
+	</div>
+
+	<div class="panel stack">
+		<div class="definition-card">
+			<h3>Observed infrastructure</h3>
+			{#if observedInfrastructure.length > 0}
+				<ul class="evidence-list evidence-list--compact">
+					{#each observedInfrastructure as link}
+						<li>
+							<a class="inline-link mono" href={linkHref(link)}>{link.indicatorValue}</a>
+							<span>{infrastructureContext(link)}</span>
+						</li>
+					{/each}
+				</ul>
+			{:else if snapshot.extractedDomains.length > 0}
+				<div class="token-list">
+					{#each snapshot.extractedDomains as domain}
+						<span class="token mono">{domain}</span>
+					{/each}
+				</div>
+			{:else}
+				<p class="muted">No outbound domains, URLs, or IPs were extracted on the latest snapshot.</p>
+			{/if}
+		</div>
+
+		<div class="definition-card">
+			<h3>Current scoring basis</h3>
+			<p class="table-subtext">
+				Severity comes from behavior score, external intelligence corroboration, and change score.
+				Obfuscation alone is treated as a supporting signal, not as proof of malicious behavior.
+			</p>
+		</div>
+	</div>
 </section>
 
 <section class="table-card page-section">

@@ -32,6 +32,84 @@ _SHELL_ASSIGNMENT_RE = re.compile(
 _BARE_DOMAIN_RE = re.compile(
     r"(?<![@/A-Za-z0-9_-])((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})(?![A-Za-z0-9_-])"
 )
+_FILELIKE_SUFFIXES = {
+    "csv",
+    "css",
+    "docx",
+    "gif",
+    "html",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "jsx",
+    "lock",
+    "log",
+    "md",
+    "pdf",
+    "png",
+    "pptx",
+    "py",
+    "sh",
+    "skill",
+    "sql",
+    "svg",
+    "toml",
+    "ts",
+    "tsx",
+    "txt",
+    "webp",
+    "xlsx",
+    "xml",
+    "yaml",
+    "yml",
+}
+_CODELIKE_SUFFIXES = {
+    "append",
+    "argumentparser",
+    "args",
+    "decode",
+    "dumps",
+    "dump",
+    "encode",
+    "endswith",
+    "extend",
+    "findall",
+    "get",
+    "items",
+    "keys",
+    "jsondecodeerror",
+    "kill",
+    "load",
+    "loads",
+    "lower",
+    "match",
+    "mkdir",
+    "model",
+    "name",
+    "open",
+    "parent",
+    "path",
+    "popen",
+    "read",
+    "replace",
+    "resolve",
+    "result",
+    "run",
+    "save",
+    "search",
+    "split",
+    "startswith",
+    "stderr",
+    "stdin",
+    "stdout",
+    "strip",
+    "timeoutexpired",
+    "upper",
+    "values",
+    "wait",
+    "write",
+}
 
 
 def expand_text_variants(text: str) -> list[tuple[str, str]]:
@@ -61,11 +139,20 @@ def extract_bare_domains(text: str) -> list[str]:
     seen: set[str] = set()
     for match in _BARE_DOMAIN_RE.finditer(text):
         value = match.group(1).lower()
+        if _should_ignore_domain_like_token(value):
+            continue
         if value in seen:
             continue
         seen.add(value)
         domains.append(value)
     return domains
+
+
+def _should_ignore_domain_like_token(value: str) -> bool:
+    suffix = value.rsplit(".", 1)[-1]
+    if suffix in _FILELIKE_SUFFIXES or suffix in _CODELIKE_SUFFIXES:
+        return True
+    return False
 
 
 def _append_variant(variants: list[tuple[str, str]], kind: str, value: str) -> None:

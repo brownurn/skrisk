@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import ipaddress
+from pathlib import Path
 import re
 from urllib.parse import urlparse
 
@@ -27,6 +28,53 @@ _EXFIL_PATTERNS = (
     "id_rsa",
     ".env",
 )
+_SENSITIVE_SOURCE_PATTERNS = (
+    re.compile(r"~\/\.ssh(?:\/|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])\.ssh\/", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])id_rsa(?:$|[^\w])", re.IGNORECASE),
+    re.compile(r"~\/\.aws\/credentials\b", re.IGNORECASE),
+    re.compile(r"aws_secret_access_key", re.IGNORECASE),
+    re.compile(r"aws_access_key_id", re.IGNORECASE),
+    re.compile(r"aws_session_token", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])api[_-]?key(?:$|[^\w])", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])secret(?:$|[^\w])", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])token(?:$|[^\w])", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])cookie(?:$|[^\w])", re.IGNORECASE),
+    re.compile(r"(?:^|[^\w])authorization(?:$|[^\w])", re.IGNORECASE),
+    re.compile(
+        r"\b(?:cat|type)\b[^\n]*\b\.env(?:\.[A-Za-z0-9._-]+)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:open|read_text|read_bytes|readfile|readfilesync|slurp)\b[^\n]*\b\.env(?:\.[A-Za-z0-9._-]+)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"@\.env(?:\.[A-Za-z0-9._-]+)?\b", re.IGNORECASE),
+)
+_REMOTE_SINK_PATTERNS = (
+    re.compile(
+        r"\bcurl\b[^\n]*https?://[^\s\"')>]+[^\n]*(?:\b(?:post|put|upload)\b|-f\b|--form\b|-d\b|--data\b|--upload-file\b|-t\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\brequests\.(?:post|put)\s*\(", re.IGNORECASE),
+    re.compile(r"\bhttpx\.(?:post|put)\s*\(", re.IGNORECASE),
+    re.compile(r"\baxios\.(?:post|put)\s*\(", re.IGNORECASE),
+    re.compile(r"\bfetch\s*\(", re.IGNORECASE),
+    re.compile(r"https?://[^\s\"')>]+[^\n]*\b(?:upload|webhook|collect|submit|exfil)\b", re.IGNORECASE),
+)
+_OBFUSCATING_VARIANTS = {
+    "decoded-base64",
+    "decoded-hex",
+    "decoded-powershell",
+    "decoded-charcode",
+}
+_DECODED_BARE_DOMAIN_VARIANTS = {
+    "decoded-base64",
+    "decoded-hex",
+    "decoded-powershell",
+    "decoded-charcode",
+}
+_TEXTLIKE_BARE_DOMAIN_FILES = {".json", ".md", ".rst", ".txt", ".yaml", ".yml"}
 
 
 @dataclass(slots=True)
@@ -104,7 +152,7 @@ class SkillAnalyzer:
                     )
                     break
 
-            if len(variants) > 1:
+            if any(variant_kind in _OBFUSCATING_VARIANTS for variant_kind, _ in variants[1:]):
                 findings.append(
                     Finding(
                         path=path,
@@ -114,22 +162,16 @@ class SkillAnalyzer:
                     )
                 )
 
-            if any(indicator in expanded_lowered for indicator in _EXFIL_PATTERNS):
-                post_lines = [
-                    line.strip()
-                    for line in expanded.splitlines()
-                    if "http" in line.lower()
-                    and any(indicator in line.lower() for indicator in _EXFIL_PATTERNS)
-                ]
-                if "upload" in expanded_lowered or "post" in expanded_lowered or post_lines:
-                    findings.append(
-                        Finding(
-                            path=path,
-                            category="data_exfiltration",
-                            severity="critical",
-                            evidence=post_lines[0] if post_lines else "Sensitive paths or secrets sent to remote endpoint",
-                        )
+            exfil_evidence = _detect_data_exfiltration_evidence(expanded)
+            if exfil_evidence is not None:
+                findings.append(
+                    Finding(
+                        path=path,
+                        category="data_exfiltration",
+                        severity="critical",
+                        evidence=exfil_evidence,
                     )
+                )
 
             for variant_kind, variant_text in variants:
                 for match in _URL_RE.finditer(variant_text):
@@ -161,6 +203,9 @@ class SkillAnalyzer:
                                 raw_value=url,
                             )
                         )
+
+                if not _should_extract_bare_domains(path=path, variant_kind=variant_kind):
+                    continue
 
                 for domain in extract_bare_domains(variant_text):
                     domains.add(domain)
@@ -267,6 +312,52 @@ def _domain_extraction_kind(variant_kind: str) -> str:
     if variant_kind == "original":
         return "bare-domain"
     return f"{variant_kind}-domain"
+
+
+def _should_extract_bare_domains(*, path: str, variant_kind: str) -> bool:
+    if variant_kind in _DECODED_BARE_DOMAIN_VARIANTS:
+        return True
+    if variant_kind != "original":
+        return False
+    path_obj = Path(path)
+    if path_obj.name.upper() == "SKILL.MD":
+        return True
+    return path_obj.suffix.lower() in _TEXTLIKE_BARE_DOMAIN_FILES
+
+
+def _detect_data_exfiltration_evidence(text: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    for index, line in enumerate(lines):
+        window_lines = lines[max(0, index - 1) : min(len(lines), index + 2)]
+        window_text = "\n".join(window_lines)
+        if not _contains_sensitive_source(window_text):
+            continue
+        if not _contains_remote_sink(window_text):
+            continue
+        for candidate in window_lines:
+            if _contains_remote_sink(candidate):
+                return candidate
+        return window_text
+
+    return None
+
+
+def _contains_sensitive_source(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _SENSITIVE_SOURCE_PATTERNS)
+
+
+def _contains_remote_sink(text: str) -> bool:
+    lowered = text.lower()
+    if "http://" not in lowered and "https://" not in lowered and "webhook" not in lowered:
+        return False
+
+    if any(pattern.search(text) for pattern in _REMOTE_SINK_PATTERNS):
+        return True
+
+    return any(marker in lowered for marker in (" upload ", " post ", " put ", " send "))
 
 
 def _dedupe_indicators(indicators: list[ExtractedIndicator]) -> list[ExtractedIndicator]:

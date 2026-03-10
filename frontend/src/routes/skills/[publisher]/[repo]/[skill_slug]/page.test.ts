@@ -153,6 +153,93 @@ test('renders install telemetry and history alongside skill evidence', () => {
 	expect(screen.getByText('300')).toBeInTheDocument();
 	expect(screen.getByRole('heading', { name: 'Install history' })).toBeInTheDocument();
 	expect(screen.getByText('Scan attribution')).toBeInTheDocument();
+	expect(screen.getByRole('heading', { name: 'Why this skill is flagged' })).toBeInTheDocument();
+	expect(screen.getByText(/Hard evidence/)).toBeInTheDocument();
+	expect(screen.getAllByText(/Posts local files to a remote endpoint/).length).toBeGreaterThan(0);
 	expect(screen.getByRole('heading', { name: 'Behavior findings' })).toBeInTheDocument();
-	expect(screen.getByRole('link', { name: 'drop.example' })).toBeInTheDocument();
+	expect(screen.getAllByRole('link', { name: 'drop.example' }).length).toBeGreaterThan(0);
+});
+
+test('renders a no-hard-evidence verdict when the latest snapshot is clean', () => {
+	render(SkillDetailPage, {
+		data: {
+			skill: {
+				publisher: 'anthropics',
+				repo: 'skills',
+				skillSlug: 'skill-creator',
+				title: 'Skill Creator',
+				relativePath: 'skills/skill-creator',
+				registryUrl: 'https://skills.sh/anthropics/skills/skill-creator',
+				currentWeeklyInstalls: 451_538,
+				currentWeeklyInstallsObservedAt: '2026-03-10T20:00:00+00:00',
+				currentTotalInstalls: 451_538,
+				currentTotalInstallsObservedAt: '2026-03-10T20:00:00+00:00',
+				peakWeeklyInstalls: 451_538,
+				weeklyInstallsDelta: 0,
+				impactScore: 90,
+				priorityScore: 45,
+				sourceCount: 1,
+				sources: ['skills.sh'],
+				installBreakdown: [
+					{
+						sourceName: 'skills.sh',
+						weeklyInstalls: 451_538,
+						sourceUrl: 'https://skills.sh/anthropics/skills/skill-creator',
+						registryRank: 1
+					}
+				],
+				sourceEntries: [],
+				installHistory: [],
+				externalVerdicts: [],
+				latestSnapshot: {
+					id: 510215,
+					versionLabel: 'b0cbd3d',
+					folderHash: 'safe123',
+					referencedFiles: ['SKILL.md', 'scripts/run_eval.py'],
+					extractedDomains: [
+						'apache.org',
+						'claude.ai',
+						'fonts.googleapis.com',
+						'fonts.gstatic.com',
+						'localhost'
+					],
+					riskReport: {
+						severity: 'none',
+						score: 0,
+						behaviorScore: 0,
+						intelScore: 0,
+						changeScore: 0,
+						confidence: 'suspected',
+						categories: [],
+						domains: [
+							'apache.org',
+							'claude.ai',
+							'fonts.googleapis.com',
+							'fonts.gstatic.com',
+							'localhost'
+						],
+						findings: [],
+						indicatorMatches: []
+					},
+					indicatorLinks: [
+						{
+							indicatorId: 1,
+							indicatorType: 'domain',
+							indicatorValue: 'claude.ai',
+							sourcePath: 'scripts/run_eval.py',
+							extractionKind: 'inline-url',
+							rawValue: 'https://claude.ai',
+							isNewInSnapshot: false
+						}
+					]
+				}
+			}
+		}
+	});
+
+	expect(screen.getAllByRole('heading', { name: 'Why this skill is flagged' }).length).toBeGreaterThan(0);
+	expect(
+		screen.getByText(/No hard evidence of exfiltration, malware delivery, or covert outbound infrastructure/)
+	).toBeInTheDocument();
+	expect(screen.getByText(/Decoded or reconstructed text alone is not treated as malicious/)).toBeInTheDocument();
 });

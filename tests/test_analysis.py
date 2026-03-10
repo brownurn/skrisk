@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 
 from skrisk.analysis.analyzer import SkillAnalyzer
+from skrisk.analysis.language_extractors import extract_bare_domains
 from skrisk.analysis.deobfuscator import decode_base64_segments
 
 
@@ -256,6 +257,64 @@ def test_analyzer_extracts_powershell_encoded_command_urls() -> None:
 
     assert ("url", "https://pwsh.evil/drop") in extracted
     assert ("domain", "pwsh.evil") in extracted
+
+
+def test_analyzer_does_not_flag_api_base_urls_as_exfiltration() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "scripts/provider.ts": """
+        const base = process.env.GOOGLE_BASE_URL || "https://generativelanguage.googleapis.com";
+        const timeout = Number(process.env.GOOGLE_TIMEOUT_MS || 30000);
+        export async function invoke(body: unknown) {
+            return fetch(base, { method: "POST", body: JSON.stringify(body) });
+        }
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="jimliu",
+        repo="baoyu-skills",
+        skill_slug="baoyu-image-gen",
+        files=files,
+    )
+
+    assert all(finding.category != "data_exfiltration" for finding in report.findings)
+
+
+def test_analyzer_does_not_flag_ast_string_extraction_as_obfuscation() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "script.py": """
+        import subprocess
+
+        prompt = "improve this description"
+        result = subprocess.run(["claude", "-p"], input=prompt, text=True)
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="anthropics",
+        repo="skills",
+        skill_slug="skill-creator",
+        files=files,
+    )
+
+    categories = {finding.category for finding in report.findings}
+
+    assert "obfuscation" not in categories
+    assert report.severity == "none"
+
+
+def test_extract_bare_domains_ignores_code_tokens_and_file_names() -> None:
+    domains = extract_bare_domains(
+        "analysis.json args.model os.environ.items fonts.googleapis.com raw.githubusercontent.com"
+    )
+
+    assert "analysis.json" not in domains
+    assert "args.model" not in domains
+    assert "os.environ.items" not in domains
+    assert "fonts.googleapis.com" in domains
+    assert "raw.githubusercontent.com" in domains
 
 
 def test_analyzer_extracts_python_formatting_and_joined_urls() -> None:
