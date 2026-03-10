@@ -244,6 +244,95 @@ async def test_ingest_service_continuous_mode_polls_until_artifact_arrives(
 
 
 @pytest.mark.asyncio
+async def test_ingest_service_passes_repo_timeout_to_persistence(tmp_path: Path, monkeypatch) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="anthropics",
+        repo="skills",
+        source_url="https://github.com/anthropics/skills",
+        registry_rank=None,
+    )
+    claim = spool.claim_repo(
+        {
+            "id": repo_id,
+            "publisher": "anthropics",
+            "repo": "skills",
+            "source_url": "https://github.com/anthropics/skills",
+        }
+    )
+    assert claim is not None
+    spool.write_artifact(claim=claim, analyzed_checkout=_sample_checkout())
+
+    captured: dict[str, object] = {}
+
+    async def fake_persist_analyzed_checkout(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "skrisk.services.analysis_spool.persist_analyzed_checkout",
+        fake_persist_analyzed_checkout,
+    )
+
+    service = AnalysisSpoolIngestService(
+        session_factory=session_factory,
+        spool=spool,
+    )
+    summary = await service.run_once(limit_artifacts=10, continuous=False)
+
+    assert summary["artifacts_ingested"] == 1
+    assert captured["repo_timeout_seconds"] == 5 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_ingest_service_defers_failed_artifact_and_clears_claim(tmp_path: Path, monkeypatch) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=None,
+    )
+    claim = spool.claim_repo(
+        {
+            "id": repo_id,
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "source_url": "https://github.com/tul-sh/skills",
+        }
+    )
+    assert claim is not None
+    spool.write_artifact(claim=claim, analyzed_checkout=_sample_checkout())
+
+    async def fake_persist_analyzed_checkout(**_kwargs):
+        raise TimeoutError("statement timeout")
+
+    monkeypatch.setattr(
+        "skrisk.services.analysis_spool.persist_analyzed_checkout",
+        fake_persist_analyzed_checkout,
+    )
+
+    service = AnalysisSpoolIngestService(
+        session_factory=session_factory,
+        spool=spool,
+    )
+    summary = await service.run_once(limit_artifacts=10, continuous=False)
+    due_after = await repository.list_due_repos()
+
+    assert summary["artifacts_failed"] == 1
+    assert not spool.is_claimed(repo_id)
+    assert spool.list_pending_artifacts() == []
+    assert repo_id not in {row["id"] for row in due_after}
+
+
+@pytest.mark.asyncio
 async def test_producer_service_defers_missing_mirror_repos(tmp_path: Path) -> None:
     session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
     await init_db(session_factory)
@@ -306,3 +395,51 @@ async def test_producer_service_defers_failed_repo_analysis(tmp_path: Path, monk
     assert repo_id not in {row["id"] for row in due_after}
     assert summary["repos_failed"] == 1
     assert summary["repos_spooled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_producer_analyze_candidate_passes_repo_timeout_to_worker(tmp_path: Path) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+    service = AnalysisSpoolProducerService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+        spool=spool,
+    )
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object, tuple[object, ...]]] = []
+
+        async def run_in_executor(self, executor, func, *args):
+            self.calls.append((executor, func, args))
+            return _sample_checkout()
+
+    fake_loop = FakeLoop()
+    candidate = {
+        "publisher": "anthropics",
+        "repo": "skills",
+        "checkout_path": tmp_path / "mirrors" / "anthropics" / "skills",
+        "claim": spool.claim_repo(
+            {
+                "id": 42,
+                "publisher": "anthropics",
+                "repo": "skills",
+                "source_url": "https://github.com/anthropics/skills",
+            }
+        ),
+    }
+    candidate["checkout_path"].mkdir(parents=True)
+
+    _, analyzed_checkout, error = await service._analyze_candidate(
+        fake_loop,
+        object(),
+        candidate,
+    )
+
+    assert error is None
+    assert analyzed_checkout is not None
+    assert fake_loop.calls
+    _, _, args = fake_loop.calls[0]
+    assert args[-1] == 5 * 60 * 60

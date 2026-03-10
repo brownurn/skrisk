@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import subprocess
 
@@ -9,6 +10,7 @@ from skrisk.services.repo_analysis import (
     AnalyzedCheckout,
     MirroredRepoAnalysisService,
     analyze_checkout,
+    resolve_repo_analysis_timeout_seconds,
 )
 from skrisk.storage.database import create_sqlite_session_factory, init_db
 from skrisk.storage.repository import SkillRepository
@@ -108,6 +110,15 @@ def test_analyze_checkout_dedupes_duplicate_skill_slugs(tmp_path: Path) -> None:
 
     assert [skill.skill_slug for skill in result.skills] == ["openai-docs"]
     assert result.discovered_skill_count == 1
+
+
+def test_resolve_repo_analysis_timeout_seconds_uses_default_for_normal_repos() -> None:
+    assert resolve_repo_analysis_timeout_seconds("tul-sh", "skills") == 45 * 60
+
+
+def test_resolve_repo_analysis_timeout_seconds_uses_extended_timeout_for_anthropic_repos() -> None:
+    assert resolve_repo_analysis_timeout_seconds("anthropics", "skills") == 5 * 60 * 60
+    assert resolve_repo_analysis_timeout_seconds("Anthropic", "claude-code") == 5 * 60 * 60
 
 
 @pytest.mark.asyncio
@@ -236,3 +247,50 @@ async def test_run_once_defers_failed_repo_analysis(tmp_path: Path, monkeypatch)
 
     assert repo_id not in {row["id"] for row in due_after}
     assert summary["repos_failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_analyze_candidate_passes_repo_timeout_to_worker(tmp_path: Path, monkeypatch) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    service = MirroredRepoAnalysisService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+    )
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object, tuple[object, ...]]] = []
+
+        async def run_in_executor(self, executor, func, *args):
+            self.calls.append((executor, func, args))
+            return AnalyzedCheckout(
+                publisher="anthropics",
+                repo="skills",
+                checkout_root="/tmp/repo",
+                commit_sha="abc123",
+                default_branch="main",
+                discovered_skill_count=0,
+                skills=[],
+            )
+
+    fake_loop = FakeLoop()
+    candidate = {
+        "publisher": "anthropics",
+        "repo": "skills",
+        "checkout_path": tmp_path / "mirrors" / "anthropics" / "skills",
+    }
+    candidate["checkout_path"].mkdir(parents=True)
+
+    result_candidate, analyzed_checkout, error = await service._analyze_candidate(
+        fake_loop,
+        object(),
+        candidate,
+    )
+
+    assert error is None
+    assert analyzed_checkout is not None
+    assert result_candidate is candidate
+    assert fake_loop.calls
+    _, _, args = fake_loop.calls[0]
+    assert args[-1] == 5 * 60 * 60

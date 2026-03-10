@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import ipaddress
 from typing import Any
 
-from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select
+from sqlalchemy import Float, Integer, and_, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -875,11 +875,17 @@ class SkillRepository:
         analyzed_checkout,
         registry_urls: dict[str, str],
         scan_interval_hours: int = 72,
+        statement_timeout_ms: int | None = None,
     ) -> int:
         analyzer = SkillAnalyzer()
         scanned_at = datetime.now(UTC)
 
         async with self._session_factory() as session:
+            if statement_timeout_ms is not None and session.bind is not None:
+                if session.bind.dialect.name == "postgresql":
+                    await session.execute(
+                        text(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
+                    )
             repo_row = await self._get_or_create_repo_row(
                 session,
                 publisher=publisher,

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import signal
 import subprocess
 
 from skrisk.analysis.analyzer import RiskReport, SkillAnalyzer
@@ -35,9 +37,25 @@ class AnalyzedCheckout:
     skills: list[AnalyzedSkill]
 
 
+DEFAULT_REPO_ANALYSIS_TIMEOUT_SECONDS = 45 * 60
+ANTHROPIC_REPO_ANALYSIS_TIMEOUT_SECONDS = 5 * 60 * 60
+
+
+class RepoAnalysisTimeoutError(TimeoutError):
+    """Raised when a single repo exceeds its analysis deadline."""
+
+
 def default_worker_count() -> int:
     cpu_count = os.cpu_count() or 1
     return max(1, int(cpu_count * 0.8))
+
+
+def resolve_repo_analysis_timeout_seconds(publisher: str, repo: str) -> int:
+    publisher_normalized = publisher.strip().lower()
+    repo_normalized = repo.strip().lower()
+    if "anthropic" in publisher_normalized or "anthropic" in repo_normalized:
+        return ANTHROPIC_REPO_ANALYSIS_TIMEOUT_SECONDS
+    return DEFAULT_REPO_ANALYSIS_TIMEOUT_SECONDS
 
 
 def analyze_checkout(*, checkout_root: Path, publisher: str, repo: str) -> AnalyzedCheckout:
@@ -197,12 +215,17 @@ class MirroredRepoAnalysisService:
 
     async def _analyze_candidate(self, loop, executor, candidate: dict) -> tuple[dict, AnalyzedCheckout | None, str | None]:
         try:
+            timeout_seconds = resolve_repo_analysis_timeout_seconds(
+                candidate["publisher"],
+                candidate["repo"],
+            )
             analyzed = await loop.run_in_executor(
                 executor,
                 _analyze_checkout_for_pool,
                 candidate["publisher"],
                 candidate["repo"],
                 candidate["checkout_path"].as_posix(),
+                timeout_seconds,
             )
             return candidate, analyzed, None
         except Exception as exc:
@@ -230,6 +253,10 @@ class MirroredRepoAnalysisService:
             source_url=candidate["source_url"],
             analyzed_checkout=analyzed_checkout,
             registry_urls=registry_urls,
+            repo_timeout_seconds=resolve_repo_analysis_timeout_seconds(
+                candidate["publisher"],
+                candidate["repo"],
+            ),
         )
         await self._repository.mark_repo_scanned(repo_id=candidate["id"])
 
@@ -260,12 +287,37 @@ class MirroredRepoAnalysisService:
             )
 
 
-def _analyze_checkout_for_pool(publisher: str, repo: str, checkout_root: str) -> AnalyzedCheckout:
-    return analyze_checkout(
-        checkout_root=Path(checkout_root),
-        publisher=publisher,
-        repo=repo,
-    )
+@contextmanager
+def _repo_analysis_timeout(timeout_seconds: int):
+    if timeout_seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handle_timeout(_signum, _frame):
+        raise RepoAnalysisTimeoutError(f"repo analysis timed out after {timeout_seconds} seconds")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _analyze_checkout_for_pool(
+    publisher: str,
+    repo: str,
+    checkout_root: str,
+    timeout_seconds: int,
+) -> AnalyzedCheckout:
+    with _repo_analysis_timeout(timeout_seconds):
+        return analyze_checkout(
+            checkout_root=Path(checkout_root),
+            publisher=publisher,
+            repo=repo,
+        )
 
 
 def _checkout_metadata(checkout_root: Path) -> tuple[str, str]:

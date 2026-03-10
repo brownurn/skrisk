@@ -47,6 +47,7 @@ async def persist_analyzed_checkout(
     source_url: str,
     analyzed_checkout: AnalyzedCheckout,
     registry_urls: dict[str, str],
+    repo_timeout_seconds: int | None = None,
 ) -> None:
     canonical_registry_urls = {
         analyzed_skill.skill_slug: registry_urls.get(
@@ -66,6 +67,9 @@ async def persist_analyzed_checkout(
         source_url=source_url,
         analyzed_checkout=analyzed_checkout,
         registry_urls=canonical_registry_urls,
+        statement_timeout_ms=(
+            int(repo_timeout_seconds * 1000) if repo_timeout_seconds is not None else None
+        ),
     )
 
 

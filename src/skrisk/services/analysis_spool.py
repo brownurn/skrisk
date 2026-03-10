@@ -18,6 +18,7 @@ from skrisk.services.repo_analysis import (
     AnalyzedCheckout,
     AnalyzedSkill,
     _analyze_checkout_for_pool,
+    resolve_repo_analysis_timeout_seconds,
 )
 from skrisk.storage.repository import SkillRepository
 
@@ -139,6 +140,8 @@ class AnalysisSpool:
 
 
 class AnalysisSpoolIngestService:
+    _FAILED_INGEST_RETRY_HOURS = 6
+
     def __init__(self, *, session_factory, spool: AnalysisSpool) -> None:
         self._repository = SkillRepository(session_factory)
         self._spool = spool
@@ -172,8 +175,13 @@ class AnalysisSpoolIngestService:
             idle_polls = 0
             summary["artifacts_seen"] += len(artifacts)
             for artifact_path in artifacts:
+                claim: AnalysisClaim | None = None
                 try:
                     claim, analyzed_checkout = self._spool.load_artifact(artifact_path)
+                    repo_timeout_seconds = resolve_repo_analysis_timeout_seconds(
+                        claim.publisher,
+                        claim.repo,
+                    )
                     registry_entries = await self._repository.list_registry_entries_for_repo_ids(
                         [claim.repo_id]
                     )
@@ -188,6 +196,7 @@ class AnalysisSpoolIngestService:
                         source_url=claim.source_url,
                         analyzed_checkout=analyzed_checkout,
                         registry_urls=registry_urls,
+                        repo_timeout_seconds=repo_timeout_seconds,
                     )
                     self._spool.complete_artifact(
                         artifact_path=artifact_path,
@@ -197,7 +206,17 @@ class AnalysisSpoolIngestService:
                     summary["skills_ingested"] += len(analyzed_checkout.skills)
                 except Exception:
                     summary["artifacts_failed"] += 1
-                    self._spool.requeue_artifact(artifact_path)
+                    if claim is None:
+                        self._spool.requeue_artifact(artifact_path)
+                        continue
+                    self._spool.complete_artifact(
+                        artifact_path=artifact_path,
+                        claim=claim,
+                    )
+                    await self._repository.defer_repo_scan(
+                        repo_id=claim.repo_id,
+                        retry_after_hours=self._FAILED_INGEST_RETRY_HOURS,
+                    )
             if not continuous:
                 break
         return summary
@@ -318,12 +337,17 @@ class AnalysisSpoolProducerService:
 
     async def _analyze_candidate(self, loop, executor, candidate: dict) -> tuple[dict, AnalyzedCheckout | None, str | None]:
         try:
+            timeout_seconds = resolve_repo_analysis_timeout_seconds(
+                candidate["publisher"],
+                candidate["repo"],
+            )
             analyzed = await loop.run_in_executor(
                 executor,
                 _analyze_checkout_for_pool,
                 candidate["publisher"],
                 candidate["repo"],
                 candidate["checkout_path"].as_posix(),
+                timeout_seconds,
             )
             return candidate, analyzed, None
         except Exception as exc:
