@@ -105,6 +105,11 @@ class Skill(Base):
     current_registry_sync_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("registry_sync_runs.id")
     )
+    latest_snapshot_id: Mapped[int | None] = mapped_column(Integer)
+    latest_severity: Mapped[str | None] = mapped_column(String(32))
+    latest_risk_score: Mapped[int | None] = mapped_column(Integer)
+    latest_confidence: Mapped[str | None] = mapped_column(String(32))
+    latest_indicator_match_count: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

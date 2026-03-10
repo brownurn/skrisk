@@ -148,7 +148,11 @@
 						<tbody>
 							{#each data.flaggedRepos as repo}
 								<tr>
-									<td class="mono">{repo.publisher}/{repo.repo}</td>
+									<td class="mono">
+										<a class="inline-link" href={`/repos/${repo.publisher}/${repo.repo}`}>
+											{repo.publisher}/{repo.repo}
+										</a>
+									</td>
 									<td>
 										{repo.flaggedSkillCount} flagged skills
 										{#if repo.criticalSkillCount > 0}

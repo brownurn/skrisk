@@ -11,6 +11,7 @@ import type {
 	InstallHistoryEntry,
 	LinkedSkill,
 	OverviewData,
+	RepoDetail,
 	RiskFinding,
 	RiskReport,
 	SkillDetail,
@@ -373,6 +374,16 @@ function normalizeFlaggedRepo(raw: Record<string, unknown>): FlaggedRepoSummary 
 	};
 }
 
+function normalizeRepoDetail(raw: Record<string, unknown>): RepoDetail {
+	return {
+		...normalizeFlaggedRepo(raw),
+		sourceUrl: raw.source_url ? String(raw.source_url) : null,
+		skills: Array.isArray(raw.skills)
+			? raw.skills.map((item) => normalizeSkillSummary(item as Record<string, unknown>))
+			: []
+	};
+}
+
 export async function loadOverview(fetcher: Fetcher): Promise<OverviewData> {
 	const rawOverview = await requestJson<Record<string, unknown>>(fetcher, '/api/overview');
 	const rawCriticalSkills = Array.isArray(rawOverview.critical_skills)
@@ -466,6 +477,15 @@ export async function loadSkillDetail(
 			? raw.source_entries.map((item) => normalizeSourceEntry(item as Record<string, unknown>))
 			: []
 	};
+}
+
+export async function loadRepoDetail(
+	fetcher: Fetcher,
+	publisher: string,
+	repo: string
+): Promise<RepoDetail> {
+	const raw = await requestJson<Record<string, unknown>>(fetcher, `/api/repos/${publisher}/${repo}`);
+	return normalizeRepoDetail(raw);
 }
 
 export async function loadIndicators(fetcher: Fetcher): Promise<IndicatorSummary[]> {

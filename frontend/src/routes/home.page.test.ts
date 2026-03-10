@@ -96,4 +96,8 @@ test('renders intel-backed dashboard metrics', () => {
 	expect(screen.getByText('skills.sh')).toBeInTheDocument();
 	expect(screen.getByText('skillsmp')).toBeInTheDocument();
 	expect(screen.getAllByText('8').length).toBeGreaterThan(0);
+	expect(screen.getByRole('link', { name: 'tul-sh/skills' })).toHaveAttribute(
+		'href',
+		'/repos/tul-sh/skills'
+	);
 });

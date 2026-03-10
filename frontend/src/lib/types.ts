@@ -223,6 +223,11 @@ export interface FlaggedRepoSummary {
 	totalInstalls: number;
 }
 
+export interface RepoDetail extends FlaggedRepoSummary {
+	sourceUrl: string | null;
+	skills: SkillSummary[];
+}
+
 export interface OverviewData {
 	stats: DashboardStats;
 	criticalSkills: SkillSummary[];

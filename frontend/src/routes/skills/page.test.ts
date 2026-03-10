@@ -131,7 +131,9 @@ test('explains analyst columns and falls back to inferred registries when explic
 
 	expect(screen.getAllByTitle(/B = behavior score/i).length).toBeGreaterThan(0);
 	expect(screen.getAllByTitle(/Priority combines the latest risk score/i).length).toBeGreaterThan(0);
-	expect(screen.getAllByTitle(/Top domain shows the first extracted domain/i).length).toBeGreaterThan(0);
+	expect(
+		screen.getAllByTitle(/Top domain shows the first meaningful external domain/i).length
+	).toBeGreaterThan(0);
 	expect(screen.getAllByText('skills.sh').length).toBeGreaterThan(0);
 });
 

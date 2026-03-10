@@ -986,6 +986,17 @@ class SkillRepository:
                 )
                 session.add(skill_snapshot)
                 await session.flush()
+                skill_row.latest_snapshot_id = skill_snapshot.id
+                skill_row.latest_severity = str(risk_report.get("severity") or "none")
+                skill_row.latest_risk_score = int(risk_report.get("score") or 0)
+                confidence = risk_report.get("confidence")
+                skill_row.latest_confidence = str(confidence) if confidence is not None else None
+                indicator_matches_payload = risk_report.get("indicator_matches") or []
+                skill_row.latest_indicator_match_count = (
+                    len(indicator_matches_payload)
+                    if isinstance(indicator_matches_payload, list)
+                    else 0
+                )
 
                 for indicator, indicator_id in linked_indicators:
                     session.add(
@@ -1102,6 +1113,18 @@ class SkillRepository:
                 risk_report=risk_report,
             )
             session.add(row)
+            await session.flush()
+            skill = await session.get(Skill, skill_id)
+            if skill is not None:
+                skill.latest_snapshot_id = row.id
+                skill.latest_severity = str(risk_report.get("severity") or "none")
+                skill.latest_risk_score = int(risk_report.get("score") or 0)
+                confidence = risk_report.get("confidence")
+                skill.latest_confidence = str(confidence) if confidence is not None else None
+                indicator_matches = risk_report.get("indicator_matches") or []
+                skill.latest_indicator_match_count = (
+                    len(indicator_matches) if isinstance(indicator_matches, list) else 0
+                )
             await session.commit()
             await session.refresh(row)
             return row.id
@@ -1133,24 +1156,20 @@ class SkillRepository:
             await self._prepare_summary_session(session)
             tracked_repos = await session.scalar(select(func.count()).select_from(SkillRepo))
             tracked_skills = await session.scalar(select(func.count()).select_from(Skill))
-            latest_snapshot_ids = self._latest_snapshot_ids_subquery(session)
-            severity_expression = func.coalesce(
-                _json_string(SkillSnapshot.risk_report, "severity"),
-                "none",
-            )
-            indicator_matches_expression = cast(
-                SkillSnapshot.risk_report["indicator_matches"],
-                String,
-            )
             result = await session.execute(
                 select(
                     func.coalesce(
-                        func.sum(case((severity_expression == "critical", 1), else_=0)),
+                        func.sum(
+                            case((func.coalesce(Skill.latest_severity, "none") == "critical", 1), else_=0)
+                        ),
                         0,
                     ).label("critical_skills"),
                     func.coalesce(
                         func.sum(
-                            case((severity_expression.in_(("critical", "high")), 1), else_=0)
+                            case(
+                                (func.coalesce(Skill.latest_severity, "none").in_(("critical", "high")), 1),
+                                else_=0,
+                            )
                         ),
                         0,
                     ).label("high_risk_skills"),
@@ -1158,11 +1177,7 @@ class SkillRepository:
                         func.sum(
                             case(
                                 (
-                                    and_(
-                                        indicator_matches_expression.is_not(None),
-                                        indicator_matches_expression != "[]",
-                                        indicator_matches_expression != "null",
-                                    ),
+                                    func.coalesce(Skill.latest_indicator_match_count, 0) > 0,
                                     1,
                                 ),
                                 else_=0,
@@ -1172,8 +1187,6 @@ class SkillRepository:
                     ).label("intel_backed_findings"),
                 )
                 .select_from(Skill)
-                .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
-                .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
             )
             row = result.one()
             return {
@@ -1192,25 +1205,15 @@ class SkillRepository:
     ) -> list[dict[str, Any]]:
         async with self._session_factory() as session:
             await self._prepare_summary_session(session)
-            latest_snapshot_ids = self._latest_snapshot_ids_subquery(session)
-            severity_expression = func.coalesce(
-                _json_string(SkillSnapshot.risk_report, "severity"),
-                "none",
-            )
-            risk_score_expression = func.coalesce(
-                _json_integer(SkillSnapshot.risk_report, "score"),
-                0,
-            )
             query_stmt = (
                 select(Skill, SkillRepo, SkillSnapshot)
                 .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-                .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
-                .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
-                .where(severity_expression.in_(severities))
+                .outerjoin(SkillSnapshot, SkillSnapshot.id == Skill.latest_snapshot_id)
+                .where(func.coalesce(Skill.latest_severity, "none").in_(severities))
                 .order_by(
-                    risk_score_expression.desc(),
+                    func.coalesce(Skill.latest_risk_score, 0).desc(),
                     func.coalesce(Skill.current_total_installs, Skill.current_weekly_installs, -1).desc(),
-                    SkillSnapshot.id.desc().nullslast(),
+                    Skill.latest_snapshot_id.desc().nullslast(),
                     Skill.id.desc(),
                 )
                 .limit(limit)
@@ -1237,23 +1240,16 @@ class SkillRepository:
     ) -> list[dict[str, Any]]:
         async with self._session_factory() as session:
             await self._prepare_summary_session(session)
-            latest_snapshot_ids = self._latest_snapshot_ids_subquery(session)
-            severity_expression = func.coalesce(
-                _json_string(SkillSnapshot.risk_report, "severity"),
-                "none",
-            )
-            risk_score_expression = func.coalesce(
-                _json_integer(SkillSnapshot.risk_report, "score"),
-                0,
-            )
             flagged_count = func.sum(
-                case((severity_expression.in_(("critical", "high")), 1), else_=0)
+                case((func.coalesce(Skill.latest_severity, "none").in_(("critical", "high")), 1), else_=0)
             )
-            critical_count = func.sum(case((severity_expression == "critical", 1), else_=0))
+            critical_count = func.sum(
+                case((func.coalesce(Skill.latest_severity, "none") == "critical", 1), else_=0)
+            )
             total_installs = func.sum(
                 case(
                     (
-                        severity_expression.in_(("critical", "high")),
+                        func.coalesce(Skill.latest_severity, "none").in_(("critical", "high")),
                         func.coalesce(Skill.current_total_installs, Skill.current_weekly_installs, 0),
                     ),
                     else_=0,
@@ -1265,18 +1261,16 @@ class SkillRepository:
                     SkillRepo.repo,
                     flagged_count.label("flagged_skill_count"),
                     critical_count.label("critical_skill_count"),
-                    func.max(risk_score_expression).label("top_risk_score"),
+                    func.max(func.coalesce(Skill.latest_risk_score, 0)).label("top_risk_score"),
                     total_installs.label("total_installs"),
                 )
                 .select_from(Skill)
                 .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-                .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
-                .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
                 .group_by(SkillRepo.id, SkillRepo.publisher, SkillRepo.repo)
                 .having(flagged_count > 0)
                 .order_by(
                     critical_count.desc(),
-                    func.max(risk_score_expression).desc(),
+                    func.max(func.coalesce(Skill.latest_risk_score, 0)).desc(),
                     total_installs.desc(),
                     SkillRepo.id.asc(),
                 )
@@ -1386,18 +1380,7 @@ class SkillRepository:
                         "source_count": len(source_entries),
                         "sources": [entry["source_name"] for entry in source_entries],
                         "install_breakdown": _build_install_breakdown(source_entries),
-                        "latest_snapshot": (
-                            {
-                                "id": snapshot_row.id,
-                                "version_label": snapshot_row.version_label,
-                                "folder_hash": snapshot_row.folder_hash,
-                                "referenced_files": snapshot_row.referenced_files,
-                                "extracted_domains": snapshot_row.extracted_domains,
-                                "risk_report": snapshot_row.risk_report,
-                            }
-                            if snapshot_row is not None
-                            else None
-                        ),
+                        "latest_snapshot": _serialize_summary_snapshot(snapshot_row),
                     }
                 )
 
@@ -1595,13 +1578,11 @@ class SkillRepository:
         session: AsyncSession,
     ) -> list[tuple[Skill, SkillRepo, SkillSnapshot | None]]:
         await self._prepare_summary_session(session)
-        latest_snapshot_ids = self._latest_snapshot_ids_subquery(session)
         result = await session.execute(
             select(Skill, SkillRepo, SkillSnapshot)
             .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-            .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
-            .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
-            .order_by(SkillSnapshot.id.desc().nulls_last(), Skill.id.desc())
+            .outerjoin(SkillSnapshot, SkillSnapshot.id == Skill.latest_snapshot_id)
+            .order_by(Skill.latest_snapshot_id.desc().nulls_last(), Skill.id.desc())
         )
         return list(result.all())
 
@@ -1618,7 +1599,6 @@ class SkillRepository:
         query: str | None,
     ) -> tuple[list[tuple[Skill, SkillRepo, SkillSnapshot | None, int | None]], int]:
         await self._prepare_summary_session(session)
-        latest_snapshot_ids = self._latest_snapshot_ids_subquery(session)
         aggregated_observations = (
             select(
                 SkillRegistryObservation.skill_id.label("skill_id"),
@@ -1659,15 +1639,9 @@ class SkillRepository:
             .subquery()
         )
 
-        severity_expression = func.coalesce(
-            _json_string(SkillSnapshot.risk_report, "severity"),
-            "none",
-        )
-        risk_score_expression = func.coalesce(
-            _json_integer(SkillSnapshot.risk_report, "score"),
-            0,
-        )
-        confidence_expression = _json_string(SkillSnapshot.risk_report, "confidence")
+        severity_expression = func.coalesce(Skill.latest_severity, "none")
+        risk_score_expression = func.coalesce(Skill.latest_risk_score, 0)
+        confidence_expression = Skill.latest_confidence
         current_weekly_installs = func.coalesce(
             Skill.current_total_installs,
             Skill.current_weekly_installs,
@@ -1694,6 +1668,44 @@ class SkillRepository:
             impact_score=impact_expression,
         )
 
+        base_query = (
+            select(
+                Skill.id.label("skill_id"),
+            )
+            .join(SkillRepo, Skill.repo_id == SkillRepo.id)
+            .outerjoin(
+                previous_weekly_installs,
+                previous_weekly_installs.c.skill_id == Skill.id,
+            )
+        )
+
+        if severity is not None:
+            base_query = base_query.where(severity_expression == severity)
+        if min_weekly_installs is not None:
+            base_query = base_query.where(
+                current_weekly_installs.is_not(None),
+                current_weekly_installs >= min_weekly_installs,
+            )
+        if max_weekly_installs is not None:
+            base_query = base_query.where(
+                current_weekly_installs.is_not(None),
+                current_weekly_installs <= max_weekly_installs,
+            )
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            query_pattern = f"%{normalized_query}%"
+            base_query = base_query.where(
+                or_(
+                    func.lower(SkillRepo.publisher).like(query_pattern),
+                    func.lower(SkillRepo.repo).like(query_pattern),
+                    func.lower(Skill.skill_slug).like(query_pattern),
+                    func.lower(Skill.title).like(query_pattern),
+                )
+            )
+
+        count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+        total = int((await session.scalar(count_query)) or 0)
+
         query_stmt = (
             select(
                 Skill,
@@ -1702,8 +1714,7 @@ class SkillRepository:
                 previous_weekly_installs_expression.label("previous_weekly_installs"),
             )
             .join(SkillRepo, Skill.repo_id == SkillRepo.id)
-            .outerjoin(latest_snapshot_ids, latest_snapshot_ids.c.skill_id == Skill.id)
-            .outerjoin(SkillSnapshot, SkillSnapshot.id == latest_snapshot_ids.c.latest_snapshot_id)
+            .outerjoin(SkillSnapshot, SkillSnapshot.id == Skill.latest_snapshot_id)
             .outerjoin(
                 previous_weekly_installs,
                 previous_weekly_installs.c.skill_id == Skill.id,
@@ -1722,7 +1733,6 @@ class SkillRepository:
                 current_weekly_installs.is_not(None),
                 current_weekly_installs <= max_weekly_installs,
             )
-        normalized_query = (query or "").strip().lower()
         if normalized_query:
             query_pattern = f"%{normalized_query}%"
             query_stmt = query_stmt.where(
@@ -1733,37 +1743,33 @@ class SkillRepository:
                     func.lower(Skill.title).like(query_pattern),
                 )
             )
-
-        count_query = select(func.count()).select_from(query_stmt.order_by(None).subquery())
-        total = int((await session.scalar(count_query)) or 0)
-
         if sort in {None, "priority"}:
             query_stmt = query_stmt.order_by(
                 priority_expression.desc(),
                 func.coalesce(current_weekly_installs, -1).desc(),
                 risk_score_expression.desc(),
-                SkillSnapshot.id.desc().nullslast(),
+                Skill.latest_snapshot_id.desc().nullslast(),
                 Skill.id.desc(),
             )
         elif sort == "risk":
             query_stmt = query_stmt.order_by(
                 risk_score_expression.desc(),
                 priority_expression.desc(),
-                SkillSnapshot.id.desc().nullslast(),
+                Skill.latest_snapshot_id.desc().nullslast(),
                 Skill.id.desc(),
             )
         elif sort == "installs":
             query_stmt = query_stmt.order_by(
                 func.coalesce(current_weekly_installs, -1).desc(),
                 priority_expression.desc(),
-                SkillSnapshot.id.desc().nullslast(),
+                Skill.latest_snapshot_id.desc().nullslast(),
                 Skill.id.desc(),
             )
         elif sort == "growth":
             query_stmt = query_stmt.order_by(
                 growth_expression.desc(),
                 func.coalesce(current_weekly_installs, -1).desc(),
-                SkillSnapshot.id.desc().nullslast(),
+                Skill.latest_snapshot_id.desc().nullslast(),
                 Skill.id.desc(),
             )
 
@@ -2018,13 +2024,17 @@ class SkillRepository:
             if skill_row is None:
                 return None
 
-            snapshot_result = await session.execute(
-                select(SkillSnapshot)
-                .where(SkillSnapshot.skill_id == skill_row.id)
-                .order_by(SkillSnapshot.id.desc())
-                .limit(1)
-            )
-            latest_snapshot = snapshot_result.scalar_one_or_none()
+            latest_snapshot = None
+            if skill_row.latest_snapshot_id is not None:
+                latest_snapshot = await session.get(SkillSnapshot, skill_row.latest_snapshot_id)
+            if latest_snapshot is None:
+                snapshot_result = await session.execute(
+                    select(SkillSnapshot)
+                    .where(SkillSnapshot.skill_id == skill_row.id)
+                    .order_by(SkillSnapshot.id.desc())
+                    .limit(1)
+                )
+                latest_snapshot = snapshot_result.scalar_one_or_none()
             observations_by_skill = await self._load_registry_observations(session, [skill_row.id])
             observations = observations_by_skill.get(skill_row.id, [])
             source_entry_result = await session.execute(
@@ -2143,6 +2153,79 @@ class SkillRepository:
                     }
                     for verdict in verdicts
                 ],
+            }
+
+    async def get_repo_detail(
+        self,
+        *,
+        publisher: str,
+        repo: str,
+    ) -> dict[str, Any] | None:
+        async with self._session_factory() as session:
+            repo_result = await session.execute(
+                select(SkillRepo).where(
+                    SkillRepo.publisher == publisher,
+                    SkillRepo.repo == repo,
+                )
+            )
+            repo_row = repo_result.scalar_one_or_none()
+            if repo_row is None:
+                return None
+
+            result = await session.execute(
+                select(Skill, SkillSnapshot)
+                .outerjoin(SkillSnapshot, SkillSnapshot.id == Skill.latest_snapshot_id)
+                .where(Skill.repo_id == repo_row.id)
+                .order_by(
+                    case((func.coalesce(Skill.latest_severity, "none") == "critical", 2),
+                         (func.coalesce(Skill.latest_severity, "none") == "high", 1),
+                         else_=0).desc(),
+                    func.coalesce(Skill.latest_risk_score, 0).desc(),
+                    func.coalesce(Skill.current_total_installs, Skill.current_weekly_installs, -1).desc(),
+                    Skill.id.asc(),
+                )
+            )
+            rows = list(result.all())
+            skill_ids = [skill_row.id for skill_row, _ in rows]
+            source_entries_by_skill = await self._load_source_entries(session, skill_ids)
+
+            skills = [
+                _serialize_skill_summary(
+                    skill_row=skill_row,
+                    repo_row=repo_row,
+                    snapshot_row=snapshot_row,
+                    source_entries=source_entries_by_skill.get(skill_row.id, []),
+                )
+                for skill_row, snapshot_row in rows
+            ]
+            critical_skill_count = sum(
+                1 for skill_row, _ in rows if (skill_row.latest_severity or "none") == "critical"
+            )
+            flagged_skill_count = sum(
+                1
+                for skill_row, _ in rows
+                if (skill_row.latest_severity or "none") in {"critical", "high"}
+            )
+            top_severity = "critical" if critical_skill_count > 0 else (
+                "high" if flagged_skill_count > 0 else "none"
+            )
+            top_risk_score = max((int(skill_row.latest_risk_score or 0) for skill_row, _ in rows), default=0)
+            total_installs = sum(
+                int(_resolved_total_installs(skill_row) or 0)
+                for skill_row, _ in rows
+                if (skill_row.latest_severity or "none") in {"critical", "high"}
+            )
+
+            return {
+                "publisher": repo_row.publisher,
+                "repo": repo_row.repo,
+                "source_url": repo_row.source_url,
+                "flagged_skill_count": flagged_skill_count,
+                "critical_skill_count": critical_skill_count,
+                "top_severity": top_severity,
+                "top_risk_score": top_risk_score,
+                "total_installs": total_installs,
+                "skills": skills,
             }
 
     async def _recompute_skill_total_installs(
@@ -2394,18 +2477,7 @@ def _serialize_skill_summary(
         "source_count": len(resolved_source_entries),
         "sources": [entry["source_name"] for entry in resolved_source_entries],
         "install_breakdown": _build_install_breakdown(resolved_source_entries),
-        "latest_snapshot": (
-            {
-                "id": snapshot_row.id,
-                "version_label": snapshot_row.version_label,
-                "folder_hash": snapshot_row.folder_hash,
-                "referenced_files": snapshot_row.referenced_files,
-                "extracted_domains": snapshot_row.extracted_domains,
-                "risk_report": snapshot_row.risk_report,
-            }
-            if snapshot_row is not None
-            else None
-        ),
+        "latest_snapshot": _serialize_summary_snapshot(snapshot_row),
     }
 
 
@@ -2443,6 +2515,32 @@ def _serialize_source_entry(
         "first_seen_at": _isoformat_datetime(source_entry.first_seen_at),
         "last_seen_at": _isoformat_datetime(source_entry.last_seen_at),
         "raw_payload": source_entry.raw_payload,
+    }
+
+
+def _serialize_summary_snapshot(snapshot_row: SkillSnapshot | None) -> dict[str, Any] | None:
+    if snapshot_row is None:
+        return None
+
+    risk_report = snapshot_row.risk_report or {}
+    return {
+        "id": snapshot_row.id,
+        "version_label": snapshot_row.version_label,
+        "folder_hash": snapshot_row.folder_hash,
+        "referenced_files": [],
+        "extracted_domains": list(snapshot_row.extracted_domains[:20]),
+        "risk_report": {
+            "severity": risk_report.get("severity", "none"),
+            "score": int(risk_report.get("score") or 0),
+            "behavior_score": int(risk_report.get("behavior_score") or 0),
+            "intel_score": int(risk_report.get("intel_score") or 0),
+            "change_score": int(risk_report.get("change_score") or 0),
+            "confidence": risk_report.get("confidence"),
+            "categories": list(risk_report.get("categories") or []),
+            "domains": list(risk_report.get("domains") or []),
+            "findings": [],
+            "indicator_matches": [],
+        },
     }
 
 

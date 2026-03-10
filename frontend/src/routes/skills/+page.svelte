@@ -71,7 +71,7 @@
 	const priorityTooltip =
 		'Priority combines the latest risk score, confidence, and install impact to rank which skills analysts should review first.';
 	const topDomainTooltip =
-		'Top domain shows the first extracted domain from the latest snapshot. It is a representative domain, not the most-contacted or most-frequent domain.';
+		'Top domain shows the first meaningful external domain from the latest snapshot after placeholders, loopback values, and code tokens are filtered out. It is a representative domain, not the most-contacted or most-frequent domain.';
 
 	function isFlagged(skill: SkillSummary): boolean {
 		const severity = skill.latestSnapshot.riskReport.severity;

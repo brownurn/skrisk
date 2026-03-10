@@ -1,5 +1,17 @@
 import type { InstallHistoryEntry, SeverityLevel, SkillSummary } from '$lib/types';
 
+const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const CODELIKE_SUFFIXES = new Set([
+	'filesystem',
+	'items',
+	'localecompare',
+	'name',
+	'procfs',
+	'statuscode',
+	'sysfs',
+	'value'
+]);
+
 export function severityTone(severity: string): 'critical' | 'high' | 'medium' {
 	if (severity === 'critical') return 'critical';
 	if (severity === 'high') return 'high';
@@ -75,7 +87,44 @@ export function registryLabels(skill: Pick<SkillSummary, 'sources' | 'installBre
 }
 
 export function firstDomain(domains: string[]): string {
-	return domains[0] ?? 'No domain extracted';
+	for (const rawValue of domains) {
+		const normalized = normalizeDisplayDomain(rawValue);
+		if (normalized) {
+			return normalized;
+		}
+	}
+	return 'No external domain extracted';
+}
+
+function normalizeDisplayDomain(rawValue: string | null | undefined): string | null {
+	if (!rawValue) {
+		return null;
+	}
+
+	const value = rawValue.trim().toLowerCase().replace(/^[("'`]+/, '').replace(/[)"'`,;:\]]+$/, '');
+	if (!value) {
+		return null;
+	}
+	if (
+		value.includes('${') ||
+		value.includes('<') ||
+		value.includes('>') ||
+		value.includes(' ') ||
+		value.startsWith('--') ||
+		value === 'localhost'
+	) {
+		return null;
+	}
+	if (!DOMAIN_RE.test(value)) {
+		return null;
+	}
+
+	const suffix = value.split('.').at(-1) ?? '';
+	if (CODELIKE_SUFFIXES.has(suffix)) {
+		return null;
+	}
+
+	return value;
 }
 
 export function formatOptional(value: string | null | undefined, fallback = 'Not available'): string {

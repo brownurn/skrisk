@@ -74,6 +74,7 @@ _CODELIKE_SUFFIXES = {
     "encode",
     "endswith",
     "extend",
+    "filesystem",
     "findall",
     "get",
     "items",
@@ -87,10 +88,12 @@ _CODELIKE_SUFFIXES = {
     "mkdir",
     "model",
     "name",
+    "localecompare",
     "open",
     "parent",
     "path",
     "popen",
+    "procfs",
     "read",
     "replace",
     "resolve",
@@ -101,11 +104,14 @@ _CODELIKE_SUFFIXES = {
     "split",
     "startswith",
     "stderr",
+    "statuscode",
     "stdin",
     "stdout",
     "strip",
+    "sysfs",
     "timeoutexpired",
     "upper",
+    "value",
     "values",
     "wait",
     "write",
@@ -139,6 +145,8 @@ def extract_bare_domains(text: str) -> list[str]:
     seen: set[str] = set()
     for match in _BARE_DOMAIN_RE.finditer(text):
         value = match.group(1).lower()
+        if _should_ignore_domain_context(text, match.start(1), match.end(1)):
+            continue
         if _should_ignore_domain_like_token(value):
             continue
         if value in seen:
@@ -149,8 +157,23 @@ def extract_bare_domains(text: str) -> list[str]:
 
 
 def _should_ignore_domain_like_token(value: str) -> bool:
+    labels = value.split(".")
+    if any(not label or label.startswith("-") or label.endswith("-") for label in labels):
+        return True
     suffix = value.rsplit(".", 1)[-1]
     if suffix in _FILELIKE_SUFFIXES or suffix in _CODELIKE_SUFFIXES:
+        return True
+    return False
+
+
+def _should_ignore_domain_context(text: str, start: int, end: int) -> bool:
+    prefix = text[max(0, start - 3):start]
+    suffix = text[end:min(len(text), end + 2)]
+    if prefix.endswith("${") or prefix.endswith("}."):
+        return True
+    if prefix.endswith("<") or prefix.endswith("`") or prefix.endswith("--"):
+        return True
+    if suffix.startswith(("`", "}", ">")):
         return True
     return False
 

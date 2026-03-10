@@ -993,3 +993,215 @@ async def test_api_exposes_fast_overview_with_flagged_repos(tmp_path, monkeypatc
     assert payload["critical_skills"][0]["skill_slug"] == "secret-dump"
     assert payload["flagged_repos"][0]["publisher"] == "melurna"
     assert payload["flagged_repos"][0]["repo"] == "threat-pack"
+
+
+@pytest.mark.asyncio
+async def test_api_overview_and_skills_page_do_not_depend_on_latest_snapshot_subquery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'latest-summary.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="acme",
+        repo="skills-pack",
+        source_url="https://github.com/acme/skills-pack",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=2,
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="network-probe",
+        risk_report={
+            "severity": "high",
+            "score": 74,
+            "confidence": "likely",
+            "categories": ["network_egress"],
+            "indicator_matches": [],
+        },
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 120, 10)],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="secret-dump",
+        risk_report={
+            "severity": "critical",
+            "score": 93,
+            "confidence": "confirmed",
+            "categories": ["exfiltration"],
+            "indicator_matches": [
+                {
+                    "indicator_type": "domain",
+                    "indicator_value": "drop.example",
+                    "observations": [],
+                }
+            ],
+        },
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 5400, 2)],
+    )
+
+    def fail_latest_snapshot_ids(*_args, **_kwargs):
+        raise AssertionError("summary endpoints should not recompute latest snapshot ids")
+
+    monkeypatch.setattr(SkillRepository, "_latest_snapshot_ids_subquery", fail_latest_snapshot_ids)
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        overview_response = await client.get("/api/overview")
+        skills_page_response = await client.get("/api/skills/page?page=1&page_size=50")
+
+    assert overview_response.status_code == 200
+    assert overview_response.json()["stats"]["critical_skills"] == 1
+    assert skills_page_response.status_code == 200
+    assert skills_page_response.json()["items"][0]["skill_slug"] == "secret-dump"
+
+
+@pytest.mark.asyncio
+async def test_api_repo_detail_returns_skills_and_flagged_rollup(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'repo-detail.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="ypyt1",
+        repo="all-skills",
+        source_url="https://github.com/ypyt1/all-skills",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=2,
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="dangerous-helper",
+        risk_report={"severity": "critical", "score": 92, "confidence": "confirmed"},
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 5000, 1)],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="guide-only",
+        risk_report={"severity": "none", "score": 0, "confidence": "likely"},
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 100, 2)],
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/repos/ypyt1/all-skills")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["publisher"] == "ypyt1"
+    assert payload["repo"] == "all-skills"
+    assert payload["flagged_skill_count"] == 1
+    assert payload["critical_skill_count"] == 1
+    assert payload["top_severity"] == "critical"
+    assert [item["skill_slug"] for item in payload["skills"]] == [
+        "dangerous-helper",
+        "guide-only",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_api_summary_endpoints_trim_heavy_snapshot_evidence(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'summary-payload.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="acme",
+        repo="skills-pack",
+        source_url="https://github.com/acme/skills-pack",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=repo_id,
+        repo_snapshot_id=repo_snapshot_id,
+        skill_slug="secret-dump",
+        risk_report={
+            "severity": "critical",
+            "score": 93,
+            "behavior_score": 55,
+            "intel_score": 20,
+            "change_score": 18,
+            "confidence": "confirmed",
+            "categories": ["exfiltration"],
+            "findings": [
+                {
+                    "path": "SKILL.md",
+                    "category": "data_exfiltration",
+                    "severity": "critical",
+                    "evidence": "upload ~/.aws/credentials",
+                }
+            ],
+            "indicator_matches": [
+                {
+                    "indicator_type": "domain",
+                    "indicator_value": "drop.example",
+                    "observations": [{"source_provider": "abusech"}],
+                }
+            ],
+        },
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 5400, 2)],
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        overview_response = await client.get("/api/overview")
+        skills_page_response = await client.get("/api/skills/page?page=1&page_size=50")
+        detail_response = await client.get("/api/skills/acme/skills-pack/secret-dump")
+
+    assert overview_response.status_code == 200
+    critical_summary = overview_response.json()["critical_skills"][0]["latest_snapshot"]["risk_report"]
+    assert critical_summary["severity"] == "critical"
+    assert critical_summary["indicator_matches"] == []
+    assert critical_summary["findings"] == []
+
+    assert skills_page_response.status_code == 200
+    page_summary = skills_page_response.json()["items"][0]["latest_snapshot"]["risk_report"]
+    assert page_summary["indicator_matches"] == []
+    assert page_summary["findings"] == []
+
+    assert detail_response.status_code == 200
+    detail_risk_report = detail_response.json()["latest_snapshot"]["risk_report"]
+    assert len(detail_risk_report["indicator_matches"]) == 1
+    assert len(detail_risk_report["findings"]) == 1

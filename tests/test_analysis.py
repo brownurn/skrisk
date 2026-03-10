@@ -390,3 +390,23 @@ def test_analyzer_extracts_shell_ast_built_urls() -> None:
 
     assert ("url", "https://shell.evil/drop") in extracted
     assert ("domain", "shell.evil") in extracted
+
+
+def test_extract_bare_domains_ignores_placeholders_and_code_tokens() -> None:
+    text = """
+    0.0.0.0
+    127.0.0.1
+    ${okta_domain}
+    ${accountid}.r2.cloudflarestorage.com`
+    <machine-name
+    --collector.filesystem
+    apihealth.statuscode
+    a.value
+    api.example.com
+    fonts.gstatic.com
+    """
+
+    assert extract_bare_domains(text) == [
+        "api.example.com",
+        "fonts.gstatic.com",
+    ]

@@ -91,6 +91,17 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> APIRouter
             raise HTTPException(status_code=404, detail="Skill not found")
         return detail
 
+    @router.get("/api/repos/{publisher}/{repo}")
+    async def repo_detail(publisher: str, repo: str) -> dict:
+        await ensure_initialized(session_factory)
+        detail = await repository.get_repo_detail(
+            publisher=publisher,
+            repo=repo,
+        )
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Repo not found")
+        return detail
+
     @router.get("/api/intel/feeds")
     async def intel_feeds(limit: int = 20) -> list[dict]:
         await ensure_initialized(session_factory)
