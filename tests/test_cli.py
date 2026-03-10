@@ -135,6 +135,42 @@ def test_enrich_infra_cli_runs_service_with_limit(tmp_path, monkeypatch) -> None
     assert "12 infrastructure candidates processed" in result.output
 
 
+def test_migrate_sqlite_to_postgres_cli_runs_service(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    source_db = tmp_path / "skrisk.db"
+    source_db.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SKRISK_DATABASE_URL", "postgresql://skrisk:secret@localhost/skrisk")
+
+    async def fake_migrate_from_sqlite(self, *, source_sqlite_path, reset_target, batch_size):
+        assert source_sqlite_path == source_db
+        assert reset_target is True
+        assert batch_size == 500
+        return {
+            "tables_copied": 3,
+            "rows_copied": 42,
+        }
+
+    monkeypatch.setattr(
+        "skrisk.services.db_migrate.DatabaseMigrationService.migrate_from_sqlite",
+        fake_migrate_from_sqlite,
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "migrate-sqlite-to-postgres",
+            "--source-sqlite-path",
+            str(source_db),
+            "--reset-target",
+            "--batch-size",
+            "500",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Copied 42 rows across 3 tables" in result.output
+
+
 def test_seed_registry_cli_uses_seed_snapshot_path(tmp_path, monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.setenv("SKRISK_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")

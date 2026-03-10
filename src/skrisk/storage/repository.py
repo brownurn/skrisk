@@ -1332,7 +1332,7 @@ class SkillRepository:
                 case((SkillIndicatorLink.is_new_in_snapshot.is_(True), 1), else_=0)
             )
             max_risk_score = func.max(
-                cast(func.json_extract(SkillSnapshot.risk_report, "$.score"), Integer)
+                _json_integer(SkillSnapshot.risk_report, "score")
             )
             result = await session.execute(
                 select(
@@ -1506,14 +1506,14 @@ class SkillRepository:
         )
 
         severity_expression = func.coalesce(
-            func.json_extract(SkillSnapshot.risk_report, "$.severity"),
+            _json_string(SkillSnapshot.risk_report, "severity"),
             "none",
         )
-        risk_score_expression = cast(
-            func.coalesce(func.json_extract(SkillSnapshot.risk_report, "$.score"), 0),
-            Integer,
+        risk_score_expression = func.coalesce(
+            _json_integer(SkillSnapshot.risk_report, "score"),
+            0,
         )
-        confidence_expression = func.json_extract(SkillSnapshot.risk_report, "$.confidence")
+        confidence_expression = _json_string(SkillSnapshot.risk_report, "confidence")
         current_weekly_installs = func.coalesce(
             Skill.current_total_installs,
             Skill.current_weekly_installs,
@@ -1846,10 +1846,6 @@ class SkillRepository:
                 _serialize_source_entry(source_entry, registry_source, registry_sync_run)
                 for source_entry, registry_source, registry_sync_run in source_entry_result.all()
             ]
-            source_entries = _resolved_source_entries(
-                skill_row=skill_row,
-                source_entries=source_entries,
-            )
             telemetry = _build_install_telemetry(
                 skill_row=skill_row,
                 snapshot_row=latest_snapshot,
@@ -2053,15 +2049,15 @@ def _impact_score_sql(*, current_weekly_installs, previous_weekly_installs):
         ),
         (
             previous_weekly_installs <= 0,
-            func.min(
-                100,
+            _clamp_max_sql(
                 base_score
                 + case((current_weekly_installs > 0, 20), else_=0),
+                100,
             ),
         ),
-        (ratio_expression >= 2, func.min(100, base_score + 20)),
-        (ratio_expression >= 1.1, func.min(100, base_score + 10)),
-        (ratio_expression <= 0.5, func.max(0, base_score - 10)),
+        (ratio_expression >= 2, _clamp_max_sql(base_score + 20, 100)),
+        (ratio_expression >= 1.1, _clamp_max_sql(base_score + 10, 100)),
+        (ratio_expression <= 0.5, _clamp_min_sql(base_score - 10, 0)),
         else_=base_score,
     )
 
@@ -2082,17 +2078,33 @@ def _priority_score_sql(*, risk_score, severity, confidence, impact_score):
         else_=1.0,
     )
     return func.round(
-        func.min(
-            100,
-            func.max(
-                0,
+        _clamp_max_sql(
+            _clamp_min_sql(
                 risk_score
                 * severity_multiplier
                 * confidence_multiplier
                 * (1 + (impact_score / 200.0)),
+                0,
             ),
+            100,
         )
     )
+
+
+def _clamp_min_sql(expression, minimum):
+    return case((expression < minimum, minimum), else_=expression)
+
+
+def _clamp_max_sql(expression, maximum):
+    return case((expression > maximum, maximum), else_=expression)
+
+
+def _json_string(column, key: str):
+    return column[key].as_string()
+
+
+def _json_integer(column, key: str):
+    return cast(column[key].as_string(), Integer)
 
 
 def _sort_weekly_installs_value(value: int | None) -> int:

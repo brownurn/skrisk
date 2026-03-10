@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from skrisk.api.routes import build_router
 from skrisk.config import Settings, load_settings
-from skrisk.storage.database import create_sqlite_session_factory, init_db
+from skrisk.storage.database import create_session_factory, init_db
 
 
 def create_app(session_factory=None, *, settings: Settings | None = None) -> FastAPI:
@@ -18,7 +18,7 @@ def create_app(session_factory=None, *, settings: Settings | None = None) -> Fas
     settings = settings or load_settings()
 
     if session_factory is None:
-        session_factory = create_sqlite_session_factory(settings.database_url)
+        session_factory = create_session_factory(settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

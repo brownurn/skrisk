@@ -12,6 +12,7 @@ keywords = ["skills", "security", "malware", "ai-agents", "risk", "analysis"]
 dependencies = [
     "aiosqlite>=0.20.0",
     "apscheduler>=3.10.4",
+    "asyncpg>=0.30.0",
     "click>=8.1.7",
     "fastapi>=0.115.0",
     "httpx>=0.28.1",
