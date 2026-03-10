@@ -126,33 +126,80 @@
 	</div>
 
 	<div class="panel stack">
-		<div class="panel-header">
-			<div>
-				<p class="table-label">Recent intelligence</p>
-				<h2>Feed activity and VT budget</h2>
-			</div>
-			<a class="inline-link" href="/queue/vt">Inspect queue</a>
-		</div>
-
-		<div class="definition-grid">
-			<div class="definition-card">
-				<h3>Budget Remaining</h3>
-				<p class="metric-value">{data.vtQueue.dailyBudgetRemaining}</p>
-			</div>
-			<div class="definition-card">
-				<h3>Budget Used</h3>
-				<p class="metric-value">{data.vtQueue.dailyBudgetUsed}</p>
-			</div>
-		</div>
-
-		<div class="stack">
-			{#each data.feedRuns as feedRun}
-				<div class="definition-card">
-					<h3>{feedRun.provider} / {feedRun.feedName}</h3>
-					<p class="mono">{feedRun.sourceUrl}</p>
-					<p class="muted">{feedRun.artifacts?.length ?? 0} archived artifacts</p>
+		<div class="table-card">
+			<div class="table-header">
+				<div>
+					<p class="table-label">Flagged repositories</p>
+					<h2>Flagged Repos</h2>
 				</div>
-			{/each}
+			</div>
+
+			{#if data.flaggedRepos.length > 0}
+				<div class="table-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th>Repo</th>
+								<th>Flagged skills</th>
+								<th>Severity</th>
+								<th>Total installs</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each data.flaggedRepos as repo}
+								<tr>
+									<td class="mono">{repo.publisher}/{repo.repo}</td>
+									<td>
+										{repo.flaggedSkillCount} flagged skills
+										{#if repo.criticalSkillCount > 0}
+											<p class="table-subtext">{repo.criticalSkillCount} critical</p>
+										{/if}
+									</td>
+									<td>
+										<span class="badge" data-level={severityTone(repo.topSeverity)}>
+											{repo.topSeverity}
+										</span>
+									</td>
+									<td class="mono">{formatWeeklyInstalls(repo.totalInstalls, '0')}</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{:else}
+				<div class="empty-state">No flagged repositories in the current scan wave.</div>
+			{/if}
+		</div>
+
+		<div class="panel stack">
+			<div class="panel-header">
+				<div>
+					<p class="table-label">Recent intelligence</p>
+					<h2>Feed activity and VT budget</h2>
+				</div>
+				<a class="inline-link" href="/queue/vt">Inspect queue</a>
+			</div>
+
+			<div class="definition-grid">
+				<div class="definition-card">
+					<h3>Budget Remaining</h3>
+					<p class="metric-value">{data.vtQueue.dailyBudgetRemaining}</p>
+				</div>
+				<div class="definition-card">
+					<h3>Budget Used</h3>
+					<p class="metric-value">{data.vtQueue.dailyBudgetUsed}</p>
+				</div>
+			</div>
+
+			<div class="stack">
+				{#each data.feedRuns as feedRun}
+					<div class="definition-card">
+						<h3>{feedRun.provider} / {feedRun.feedName}</h3>
+						<p class="mono">{feedRun.sourceUrl}</p>
+						<p class="muted">{feedRun.artifacts?.length ?? 0} archived artifacts</p>
+					</div>
+				{/each}
+			</div>
 		</div>
 	</div>
 </section>

@@ -23,6 +23,22 @@ def build_router(session_factory: async_sessionmaker[AsyncSession]) -> APIRouter
         await ensure_initialized(session_factory)
         return await repository.get_dashboard_stats()
 
+    @router.get("/api/overview")
+    async def overview() -> dict:
+        await ensure_initialized(session_factory)
+        stats = await repository.get_dashboard_stats()
+        critical_skills = await repository.list_dashboard_skills(limit=6, severities=("critical",))
+        flagged_repos = await repository.list_flagged_repos(limit=6)
+        feed_runs = await repository.list_intel_feed_runs(limit=6)
+        vt_queue = await repository.get_vt_queue_summary(daily_budget=settings.vt_daily_budget)
+        return {
+            "stats": stats,
+            "critical_skills": critical_skills,
+            "flagged_repos": flagged_repos,
+            "feed_runs": feed_runs,
+            "vt_queue": vt_queue,
+        }
+
     @router.get("/api/skills")
     async def list_skills(
         limit: int = 50,

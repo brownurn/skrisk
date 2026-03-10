@@ -9,7 +9,7 @@ from pathlib import Path
 
 @dataclass(slots=True, frozen=True)
 class Settings:
-    database_url: str = "sqlite+aiosqlite:///./skrisk.db"
+    database_url: str = "postgresql://skrisk:skrisk@127.0.0.1:15432/skrisk"
     mirror_root: Path = Path("data/mirrors")
     archive_root: Path = Path("data/archive")
     frontend_dist_root: Path = Path("frontend/build")
@@ -42,13 +42,17 @@ class Settings:
 def load_settings() -> Settings:
     """Load runtime settings from environment variables."""
 
+    postgres_port = os.getenv("SKRISK_POSTGRES_PORT", "15432")
     opensearch_port = os.getenv("SKRISK_OPENSEARCH_PORT", "9200")
     neo4j_http_port = os.getenv("SKRISK_NEO4J_HTTP_PORT", "7474")
     mewhois_port = os.getenv("SKRISK_MEWHOIS_PORT", "18191")
     meip_port = os.getenv("SKRISK_MEIP_PORT", "18190")
 
     return Settings(
-        database_url=os.getenv("SKRISK_DATABASE_URL", "sqlite+aiosqlite:///./skrisk.db"),
+        database_url=os.getenv(
+            "SKRISK_DATABASE_URL",
+            f"postgresql://skrisk:skrisk@127.0.0.1:{postgres_port}/skrisk",
+        ),
         mirror_root=Path(os.getenv("SKRISK_MIRROR_ROOT", "data/mirrors")),
         archive_root=Path(os.getenv("SKRISK_ARCHIVE_ROOT", "data/archive")),
         frontend_dist_root=Path(os.getenv("SKRISK_FRONTEND_DIST_ROOT", "frontend/build")),

@@ -209,12 +209,24 @@ export interface VTQueueStatus {
 	dailyBudget: number;
 	dailyBudgetUsed: number;
 	dailyBudgetRemaining: number;
+	queueItemCount?: number;
 	queueItems: VTQueueItem[];
+}
+
+export interface FlaggedRepoSummary {
+	publisher: string;
+	repo: string;
+	flaggedSkillCount: number;
+	criticalSkillCount: number;
+	topSeverity: SeverityLevel;
+	topRiskScore: number;
+	totalInstalls: number;
 }
 
 export interface OverviewData {
 	stats: DashboardStats;
 	criticalSkills: SkillSummary[];
+	flaggedRepos: FlaggedRepoSummary[];
 	feedRuns: FeedRunSummary[];
 	vtQueue: VTQueueStatus;
 }

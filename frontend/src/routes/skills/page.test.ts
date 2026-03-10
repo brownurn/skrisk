@@ -89,9 +89,11 @@ test('renders the server-provided page of skills with weekly installs', () => {
 	expect(screen.getByText('241')).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /installs/i })).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /registries/i })).toBeInTheDocument();
+	expect(screen.getByRole('columnheader', { name: /flagged/i })).toBeInTheDocument();
 	expect(screen.getByRole('columnheader', { name: /priority/i })).toBeInTheDocument();
 	expect(screen.getByText('12.0k')).toBeInTheDocument();
 	expect(screen.getByText('94')).toBeInTheDocument();
+	expect(screen.getByText('Flagged')).toBeInTheDocument();
 	expect(screen.getAllByText('skills.sh').length).toBeGreaterThan(0);
 	expect(screen.getAllByText('skillsmp').length).toBeGreaterThan(0);
 	expect(screen.getByDisplayValue('agent')).toBeInTheDocument();

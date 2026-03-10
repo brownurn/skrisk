@@ -2,6 +2,7 @@ import type {
 	DashboardStats,
 	FeedArtifact,
 	FeedRunSummary,
+	FlaggedRepoSummary,
 	IndicatorDetail,
 	IndicatorEnrichment,
 	IndicatorMatch,
@@ -360,21 +361,46 @@ function normalizeQueueItem(raw: Record<string, unknown>): VTQueueItem {
 	};
 }
 
-export async function loadOverview(fetcher: Fetcher): Promise<OverviewData> {
-	const [rawStats, rawCriticalSkills, rawFeedRuns, rawVtQueue] = await Promise.all([
-		requestJson<Record<string, number>>(fetcher, '/api/stats'),
-		requestJson<Record<string, unknown>[]>(fetcher, '/api/skills?severity=critical&limit=6'),
-		requestJson<Record<string, unknown>[]>(fetcher, '/api/intel/feeds?limit=6'),
-		requestJson<Record<string, unknown>>(fetcher, '/api/queue/vt')
-	]);
+function normalizeFlaggedRepo(raw: Record<string, unknown>): FlaggedRepoSummary {
+	return {
+		publisher: String(raw.publisher ?? ''),
+		repo: String(raw.repo ?? ''),
+		flaggedSkillCount: Number(raw.flagged_skill_count ?? 0),
+		criticalSkillCount: Number(raw.critical_skill_count ?? 0),
+		topSeverity: String(raw.top_severity ?? 'none') as FlaggedRepoSummary['topSeverity'],
+		topRiskScore: Number(raw.top_risk_score ?? 0),
+		totalInstalls: Number(raw.total_installs ?? 0)
+	};
+}
 
-	const criticalSkills = rawCriticalSkills.map((item) => normalizeSkillSummary(item));
+export async function loadOverview(fetcher: Fetcher): Promise<OverviewData> {
+	const rawOverview = await requestJson<Record<string, unknown>>(fetcher, '/api/overview');
+	const rawCriticalSkills = Array.isArray(rawOverview.critical_skills)
+		? rawOverview.critical_skills
+		: [];
+	const rawFlaggedRepos = Array.isArray(rawOverview.flagged_repos)
+		? rawOverview.flagged_repos
+		: [];
+	const rawFeedRuns = Array.isArray(rawOverview.feed_runs) ? rawOverview.feed_runs : [];
+	const rawVtQueue =
+		rawOverview.vt_queue && typeof rawOverview.vt_queue === 'object'
+			? (rawOverview.vt_queue as Record<string, unknown>)
+			: {};
+	const criticalSkills = rawCriticalSkills.map((item) =>
+		normalizeSkillSummary(item as Record<string, unknown>)
+	);
 	const vtQueue = normalizeQueueStatus(rawVtQueue);
 
 	return {
-		stats: normalizeStats(rawStats, vtQueue.queueItems.length),
+		stats: normalizeStats(
+			(rawOverview.stats as Record<string, number>) ?? {},
+			vtQueue.queueItemCount ?? vtQueue.queueItems.length
+		),
 		criticalSkills,
-		feedRuns: rawFeedRuns.map((item) => normalizeFeedRun(item)),
+		flaggedRepos: rawFlaggedRepos.map((item) =>
+			normalizeFlaggedRepo(item as Record<string, unknown>)
+		),
+		feedRuns: rawFeedRuns.map((item) => normalizeFeedRun(item as Record<string, unknown>)),
 		vtQueue
 	};
 }
@@ -477,12 +503,14 @@ export async function loadVTQueue(fetcher: Fetcher): Promise<VTQueueStatus> {
 }
 
 function normalizeQueueStatus(raw: Record<string, unknown>): VTQueueStatus {
+	const queueItems = Array.isArray(raw.queue_items)
+		? raw.queue_items.map((item) => normalizeQueueItem(item as Record<string, unknown>))
+		: [];
 	return {
 		dailyBudget: Number(raw.daily_budget ?? 0),
 		dailyBudgetUsed: Number(raw.daily_budget_used ?? 0),
 		dailyBudgetRemaining: Number(raw.daily_budget_remaining ?? 0),
-		queueItems: Array.isArray(raw.queue_items)
-			? raw.queue_items.map((item) => normalizeQueueItem(item as Record<string, unknown>))
-			: []
+		queueItemCount: Number(raw.queue_item_count ?? queueItems.length),
+		queueItems
 	};
 }

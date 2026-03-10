@@ -73,6 +73,11 @@
 	const topDomainTooltip =
 		'Top domain shows the first extracted domain from the latest snapshot. It is a representative domain, not the most-contacted or most-frequent domain.';
 
+	function isFlagged(skill: SkillSummary): boolean {
+		const severity = skill.latestSnapshot.riskReport.severity;
+		return severity === 'critical' || severity === 'high';
+	}
+
 	function buildPageHref(pageNumber: number): string {
 		const params = new URLSearchParams();
 		params.set('page', String(pageNumber));
@@ -190,6 +195,7 @@
 					<tr>
 						<th>Skill</th>
 						<th>Registries</th>
+						<th>Flagged</th>
 						<th>
 							<span class="table-help" title={priorityTooltip}>Priority</span>
 						</th>
@@ -223,6 +229,15 @@
 									</div>
 								{:else}
 									<span class="table-subtext">Unknown</span>
+								{/if}
+							</td>
+							<td>
+								{#if isFlagged(skill)}
+									<span class="badge" data-level={severityTone(skill.latestSnapshot.riskReport.severity)}>
+										Flagged
+									</span>
+								{:else}
+									<span class="table-subtext">Clear</span>
 								{/if}
 							</td>
 							<td>

@@ -905,3 +905,91 @@ async def test_app_serves_built_frontend_for_non_api_routes(tmp_path) -> None:
     assert deep_link_response.text == root_response.text
     assert asset_response.status_code == 200
     assert "User-agent" in asset_response.text
+
+
+@pytest.mark.asyncio
+async def test_api_exposes_fast_overview_with_flagged_repos(tmp_path, monkeypatch) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'overview-api.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    high_repo_id = await repository.upsert_skill_repo(
+        publisher="acme",
+        repo="skills-pack",
+        source_url="https://github.com/acme/skills-pack",
+        registry_rank=1,
+    )
+    critical_repo_id = await repository.upsert_skill_repo(
+        publisher="melurna",
+        repo="threat-pack",
+        source_url="https://github.com/melurna/threat-pack",
+        registry_rank=2,
+    )
+    high_repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=high_repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    critical_repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=critical_repo_id,
+        commit_sha="def456",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=high_repo_id,
+        repo_snapshot_id=high_repo_snapshot_id,
+        skill_slug="network-probe",
+        risk_report={
+            "severity": "high",
+            "score": 74,
+            "confidence": "likely",
+            "categories": ["network_egress"],
+            "indicator_matches": [],
+        },
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 120, 10)],
+    )
+    await _record_skill_with_install_history(
+        repository,
+        repo_id=critical_repo_id,
+        repo_snapshot_id=critical_repo_snapshot_id,
+        skill_slug="secret-dump",
+        risk_report={
+            "severity": "critical",
+            "score": 93,
+            "confidence": "confirmed",
+            "categories": ["exfiltration"],
+            "indicator_matches": [
+                {
+                    "indicator_type": "domain",
+                    "indicator_value": "drop.example",
+                    "observations": [],
+                }
+            ],
+        },
+        install_history=[(datetime(2026, 3, 9, 8, 0, tzinfo=UTC), 5400, 2)],
+    )
+
+    async def fail_latest_rows(*_args, **_kwargs):
+        raise AssertionError("overview should not load all latest rows into Python")
+
+    monkeypatch.setattr(SkillRepository, "_load_latest_skill_rows", fail_latest_rows)
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["stats"]["tracked_repos"] == 2
+    assert payload["stats"]["critical_skills"] == 1
+    assert payload["critical_skills"][0]["skill_slug"] == "secret-dump"
+    assert payload["flagged_repos"][0]["publisher"] == "melurna"
+    assert payload["flagged_repos"][0]["repo"] == "threat-pack"

@@ -67,7 +67,7 @@ SK Risk reads backend settings from the local shell environment or `.envrc`.
 - `VT_APIKEY`: used for selective VirusTotal enrichment
 - `SKILLSMP_API_KEY`: used for authenticated `skillsmp.com` search requests
 - `SKRISK_VT_DAILY_BUDGET`: optional override for the daily VT call budget
-- `SKRISK_DATABASE_URL`: optional override for the system-of-record database. Use `postgresql://skrisk:skrisk@127.0.0.1:15432/skrisk` for the local Docker Postgres service
+- `SKRISK_DATABASE_URL`: optional override for the system-of-record database. By default SK Risk uses the local Docker Postgres service at `postgresql://skrisk:skrisk@127.0.0.1:15432/skrisk`
 - `SKRISK_POSTGRES_PORT`: optional Docker Compose host port override for the bundled Postgres service, default `15432`
 - `SKRISK_MEWHOIS_URL`: optional override for the `mewhois` base URL
 - `SKRISK_MEWHOIS_PORT`: optional tunnel/default port for `mewhois` when `SKRISK_MEWHOIS_URL` is not set

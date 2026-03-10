@@ -65,6 +65,17 @@ test('renders intel-backed dashboard metrics', () => {
 					}
 				}
 			],
+			flaggedRepos: [
+				{
+					publisher: 'tul-sh',
+					repo: 'skills',
+					flaggedSkillCount: 2,
+					criticalSkillCount: 1,
+					topSeverity: 'critical',
+					topRiskScore: 88,
+					totalInstalls: 12_500
+				}
+			],
 			feedRuns: [],
 			vtQueue: {
 				dailyBudget: 490,
@@ -77,9 +88,11 @@ test('renders intel-backed dashboard metrics', () => {
 
 	expect(screen.getByText('Intel-Backed Findings')).toBeInTheDocument();
 	expect(screen.getByText('Pending VT Queue')).toBeInTheDocument();
-	expect(screen.getByRole('columnheader', { name: /installs/i })).toBeInTheDocument();
+	expect(screen.getAllByRole('columnheader', { name: /installs/i }).length).toBeGreaterThan(0);
 	expect(screen.getByRole('columnheader', { name: /registries/i })).toBeInTheDocument();
-	expect(screen.getByText('12.5k')).toBeInTheDocument();
+	expect(screen.getByRole('heading', { name: /flagged repos/i })).toBeInTheDocument();
+	expect(screen.getByText('2 flagged skills')).toBeInTheDocument();
+	expect(screen.getAllByText('12.5k').length).toBeGreaterThan(0);
 	expect(screen.getByText('skills.sh')).toBeInTheDocument();
 	expect(screen.getByText('skillsmp')).toBeInTheDocument();
 	expect(screen.getAllByText('8').length).toBeGreaterThan(0);
