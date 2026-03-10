@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import time
 import uuid
 
 from skrisk.analysis.analyzer import ExtractedIndicator, Finding, RiskReport
@@ -36,8 +37,10 @@ class AnalysisSpool:
         self._base_dir = archive_root / "analysis-spool"
         self._claims_dir = self._base_dir / "claims"
         self._pending_dir = self._base_dir / "pending"
+        self._ingesting_dir = self._base_dir / "ingesting"
         self._claims_dir.mkdir(parents=True, exist_ok=True)
         self._pending_dir.mkdir(parents=True, exist_ok=True)
+        self._ingesting_dir.mkdir(parents=True, exist_ok=True)
 
     def claim_repo(self, candidate: dict) -> AnalysisClaim | None:
         claim = AnalysisClaim(
@@ -76,6 +79,25 @@ class AnalysisSpool:
     def list_pending_artifacts(self) -> list[Path]:
         return sorted(self._pending_dir.glob("*.json"))
 
+    def claim_pending_artifacts(
+        self,
+        *,
+        limit: int,
+        stale_after_seconds: float = 900.0,
+    ) -> list[Path]:
+        self.requeue_stale_ingesting(stale_after_seconds=stale_after_seconds)
+        claimed: list[Path] = []
+        for artifact_path in sorted(self._pending_dir.glob("*.json")):
+            ingesting_path = self._ingesting_path(artifact_path.name)
+            try:
+                artifact_path.replace(ingesting_path)
+            except FileNotFoundError:
+                continue
+            claimed.append(ingesting_path)
+            if len(claimed) >= limit:
+                break
+        return claimed
+
     def load_artifact(self, artifact_path: Path) -> tuple[AnalysisClaim, AnalyzedCheckout]:
         payload = json.loads(artifact_path.read_text(encoding="utf-8"))
         claim = AnalysisClaim(**payload["claim"])
@@ -86,11 +108,34 @@ class AnalysisSpool:
         artifact_path.unlink(missing_ok=True)
         self.release_claim(claim)
 
+    def requeue_artifact(self, artifact_path: Path) -> Path:
+        pending_path = self._pending_dir / artifact_path.name
+        try:
+            artifact_path.replace(pending_path)
+        except FileNotFoundError:
+            pass
+        return pending_path
+
+    def requeue_stale_ingesting(self, *, stale_after_seconds: float) -> None:
+        if stale_after_seconds <= 0:
+            return
+        cutoff = time.time() - stale_after_seconds
+        for artifact_path in sorted(self._ingesting_dir.glob("*.json")):
+            try:
+                if artifact_path.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            self.requeue_artifact(artifact_path)
+
     def _claim_path(self, repo_id: int) -> Path:
         return self._claims_dir / f"{repo_id}.json"
 
     def _artifact_path(self, claim: AnalysisClaim) -> Path:
         return self._pending_dir / f"{claim.repo_id}-{claim.claim_token}.json"
+
+    def _ingesting_path(self, artifact_name: str) -> Path:
+        return self._ingesting_dir / artifact_name
 
 
 class AnalysisSpoolIngestService:
@@ -115,7 +160,7 @@ class AnalysisSpoolIngestService:
         idle_polls = 0
 
         while True:
-            artifacts = self._spool.list_pending_artifacts()[:limit_artifacts]
+            artifacts = self._spool.claim_pending_artifacts(limit=limit_artifacts)
             if not artifacts:
                 if not continuous:
                     break
@@ -152,12 +197,16 @@ class AnalysisSpoolIngestService:
                     summary["skills_ingested"] += len(analyzed_checkout.skills)
                 except Exception:
                     summary["artifacts_failed"] += 1
+                    self._spool.requeue_artifact(artifact_path)
             if not continuous:
                 break
         return summary
 
 
 class AnalysisSpoolProducerService:
+    _MISSING_MIRROR_RETRY_HOURS = 24
+    _FAILED_ANALYSIS_RETRY_HOURS = 6
+
     def __init__(self, *, session_factory, mirror_root: Path, spool: AnalysisSpool, progress_callback=None) -> None:
         self._repository = SkillRepository(session_factory)
         self._mirror_root = mirror_root
@@ -183,13 +232,24 @@ class AnalysisSpoolProducerService:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             while True:
                 due_repos = await self._repository.list_due_repos()
-                candidates, missing_mirror_count = self._candidate_repos(due_repos, limit_repos=limit_repos)
+                candidates, missing_mirror_rows = self._candidate_repos(
+                    due_repos,
+                    limit_repos=limit_repos,
+                )
+                if missing_mirror_rows:
+                    await self._defer_repos(
+                        rows=missing_mirror_rows,
+                        retry_after_hours=self._MISSING_MIRROR_RETRY_HOURS,
+                    )
                 if not candidates:
-                    summary["repos_missing_mirror"] += missing_mirror_count
-                    break
+                    summary["repos_missing_mirror"] += len(missing_mirror_rows)
+                    if not continuous or not due_repos:
+                        break
+                    await asyncio.sleep(2.0)
+                    continue
 
                 summary["repos_requested"] += len(candidates)
-                summary["repos_missing_mirror"] += missing_mirror_count
+                summary["repos_missing_mirror"] += len(missing_mirror_rows)
                 tasks = [
                     asyncio.create_task(
                         self._analyze_candidate(loop, executor, candidate)
@@ -202,6 +262,10 @@ class AnalysisSpoolProducerService:
                     completed_in_batch += 1
                     if error is not None:
                         self._spool.release_claim(candidate["claim"])
+                        await self._repository.defer_repo_scan(
+                            repo_id=int(candidate["id"]),
+                            retry_after_hours=self._FAILED_ANALYSIS_RETRY_HOURS,
+                        )
                         summary["repos_failed"] += 1
                         self._report_progress(
                             repos_requested=summary["repos_requested"],
@@ -233,13 +297,13 @@ class AnalysisSpoolProducerService:
                     break
         return summary
 
-    def _candidate_repos(self, due_repos: list[dict], *, limit_repos: int) -> tuple[list[dict], int]:
+    def _candidate_repos(self, due_repos: list[dict], *, limit_repos: int) -> tuple[list[dict], list[dict]]:
         candidates: list[dict] = []
-        missing_mirror_count = 0
+        missing_mirror_rows: list[dict] = []
         for row in due_repos:
             checkout_path = self._mirror_root / row["publisher"] / row["repo"]
             if not (checkout_path / ".git").exists():
-                missing_mirror_count += 1
+                missing_mirror_rows.append(row)
                 continue
             claim = self._spool.claim_repo(row)
             if claim is None:
@@ -250,7 +314,7 @@ class AnalysisSpoolProducerService:
             candidates.append(candidate)
             if len(candidates) >= limit_repos:
                 break
-        return candidates, missing_mirror_count
+        return candidates, missing_mirror_rows
 
     async def _analyze_candidate(self, loop, executor, candidate: dict) -> tuple[dict, AnalyzedCheckout | None, str | None]:
         try:
@@ -264,6 +328,13 @@ class AnalysisSpoolProducerService:
             return candidate, analyzed, None
         except Exception as exc:
             return candidate, None, repr(exc)
+
+    async def _defer_repos(self, *, rows: list[dict], retry_after_hours: int) -> None:
+        for row in rows:
+            await self._repository.defer_repo_scan(
+                repo_id=int(row["id"]),
+                retry_after_hours=retry_after_hours,
+            )
 
     def _report_progress(
         self,

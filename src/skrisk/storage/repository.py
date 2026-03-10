@@ -1804,6 +1804,20 @@ class SkillRepository:
             row.next_scan_at = scanned_at + timedelta(hours=scan_interval_hours)
             await session.commit()
 
+    async def defer_repo_scan(
+        self,
+        *,
+        repo_id: int,
+        retry_after_hours: int,
+        deferred_at: datetime | None = None,
+    ) -> None:
+        deferred_at = deferred_at or datetime.now(UTC)
+        async with self._session_factory() as session:
+            result = await session.execute(select(SkillRepo).where(SkillRepo.id == repo_id))
+            row = result.scalar_one()
+            row.next_scan_at = deferred_at + timedelta(hours=retry_after_hours)
+            await session.commit()
+
     async def get_skill_detail(
         self,
         *,

@@ -91,6 +91,9 @@ def _dedupe_discovered_skills(discovered_skills):
 class MirroredRepoAnalysisService:
     """Analyze mirrored repositories using process-based parallelism."""
 
+    _MISSING_MIRROR_RETRY_HOURS = 24
+    _FAILED_ANALYSIS_RETRY_HOURS = 6
+
     def __init__(self, *, session_factory, mirror_root: Path, progress_callback=None) -> None:
         self._repository = SkillRepository(session_factory)
         self._mirror_root = mirror_root
@@ -115,13 +118,24 @@ class MirroredRepoAnalysisService:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             while True:
                 due_repos = await self._repository.list_due_repos()
-                candidates, missing_mirror_count = self._candidate_repos(due_repos, limit_repos=limit_repos)
+                candidates, missing_mirror_rows = self._candidate_repos(
+                    due_repos,
+                    limit_repos=limit_repos,
+                )
+                if missing_mirror_rows:
+                    await self._defer_repos(
+                        rows=missing_mirror_rows,
+                        retry_after_hours=self._MISSING_MIRROR_RETRY_HOURS,
+                    )
                 if not candidates:
-                    summary["repos_missing_mirror"] += missing_mirror_count
-                    break
+                    summary["repos_missing_mirror"] += len(missing_mirror_rows)
+                    if not continuous or not due_repos:
+                        break
+                    await asyncio.sleep(2.0)
+                    continue
 
                 summary["repos_requested"] += len(candidates)
-                summary["repos_missing_mirror"] += missing_mirror_count
+                summary["repos_missing_mirror"] += len(missing_mirror_rows)
                 tasks = [
                     asyncio.create_task(
                         self._analyze_candidate(loop, executor, candidate)
@@ -133,6 +147,10 @@ class MirroredRepoAnalysisService:
                     candidate, analyzed_checkout, error = await task
                     completed_in_batch += 1
                     if error is not None:
+                        await self._repository.defer_repo_scan(
+                            repo_id=int(candidate["id"]),
+                            retry_after_hours=self._FAILED_ANALYSIS_RETRY_HOURS,
+                        )
                         summary["repos_failed"] += 1
                         self._report_progress(
                             repos_requested=summary["repos_requested"],
@@ -162,20 +180,20 @@ class MirroredRepoAnalysisService:
 
         return summary
 
-    def _candidate_repos(self, due_repos: list[dict], *, limit_repos: int) -> tuple[list[dict], int]:
+    def _candidate_repos(self, due_repos: list[dict], *, limit_repos: int) -> tuple[list[dict], list[dict]]:
         candidates: list[dict] = []
-        missing_mirror_count = 0
+        missing_mirror_rows: list[dict] = []
         for row in due_repos:
             checkout_path = self._mirror_root / row["publisher"] / row["repo"]
             if not (checkout_path / ".git").exists():
-                missing_mirror_count += 1
+                missing_mirror_rows.append(row)
                 continue
             candidate = dict(row)
             candidate["checkout_path"] = checkout_path
             candidates.append(candidate)
             if len(candidates) >= limit_repos:
                 break
-        return candidates, missing_mirror_count
+        return candidates, missing_mirror_rows
 
     async def _analyze_candidate(self, loop, executor, candidate: dict) -> tuple[dict, AnalyzedCheckout | None, str | None]:
         try:
@@ -189,6 +207,13 @@ class MirroredRepoAnalysisService:
             return candidate, analyzed, None
         except Exception as exc:
             return candidate, None, repr(exc)
+
+    async def _defer_repos(self, *, rows: list[dict], retry_after_hours: int) -> None:
+        for row in rows:
+            await self._repository.defer_repo_scan(
+                repo_id=int(row["id"]),
+                retry_after_hours=retry_after_hours,
+            )
 
     async def _persist_candidate(self, *, candidate: dict, analyzed_checkout: AnalyzedCheckout) -> None:
         from skrisk.services.ingestion import persist_analyzed_checkout

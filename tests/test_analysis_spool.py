@@ -69,6 +69,40 @@ def test_analysis_spool_claims_are_exclusive(tmp_path: Path) -> None:
     assert second_claim is None
 
 
+def test_analysis_spool_pending_artifact_claims_are_exclusive(tmp_path: Path) -> None:
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    first_claim = spool.claim_repo(
+        {
+            "id": 41,
+            "publisher": "tul-sh",
+            "repo": "skills",
+            "source_url": "https://github.com/tul-sh/skills",
+        }
+    )
+    second_claim = spool.claim_repo(
+        {
+            "id": 42,
+            "publisher": "tul-sh",
+            "repo": "skills-plus",
+            "source_url": "https://github.com/tul-sh/skills-plus",
+        }
+    )
+    assert first_claim is not None
+    assert second_claim is not None
+
+    spool.write_artifact(claim=first_claim, analyzed_checkout=_sample_checkout())
+    spool.write_artifact(claim=second_claim, analyzed_checkout=_sample_checkout())
+
+    first_batch = spool.claim_pending_artifacts(limit=1)
+    second_batch = spool.claim_pending_artifacts(limit=1)
+
+    assert len(first_batch) == 1
+    assert len(second_batch) == 1
+    assert first_batch[0] != second_batch[0]
+    assert spool.list_pending_artifacts() == []
+
+
 @pytest.mark.asyncio
 async def test_ingest_service_persists_spooled_analysis_and_clears_claim(tmp_path: Path) -> None:
     session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
@@ -183,21 +217,21 @@ async def test_ingest_service_continuous_mode_polls_until_artifact_arrives(
     )
     assert claim is not None
 
-    original_list_pending_artifacts = spool.list_pending_artifacts
+    original_claim_pending_artifacts = spool.claim_pending_artifacts
     calls = {"count": 0}
 
-    def fake_list_pending_artifacts():
+    def fake_claim_pending_artifacts(limit):
         calls["count"] += 1
         if calls["count"] == 1:
             return []
         if calls["count"] == 2:
             spool.write_artifact(claim=claim, analyzed_checkout=_sample_checkout())
-        return original_list_pending_artifacts()
+        return original_claim_pending_artifacts(limit=limit)
 
     async def fake_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(spool, "list_pending_artifacts", fake_list_pending_artifacts)
+    monkeypatch.setattr(spool, "claim_pending_artifacts", fake_claim_pending_artifacts)
     monkeypatch.setattr("skrisk.services.analysis_spool.asyncio.sleep", fake_sleep)
 
     service = AnalysisSpoolIngestService(
@@ -207,3 +241,68 @@ async def test_ingest_service_continuous_mode_polls_until_artifact_arrives(
     summary = await service.run_once(limit_artifacts=10, continuous=True, max_idle_polls=2)
 
     assert summary["artifacts_ingested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_producer_service_defers_missing_mirror_repos(tmp_path: Path) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=None,
+    )
+
+    service = AnalysisSpoolProducerService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+        spool=spool,
+    )
+    summary = await service.run_once(limit_repos=1, workers=1, continuous=False)
+
+    due_after = await repository.list_due_repos()
+
+    assert repo_id not in {row["id"] for row in due_after}
+    assert summary["repos_missing_mirror"] == 1
+    assert summary["repos_spooled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_producer_service_defers_failed_repo_analysis(tmp_path: Path, monkeypatch) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+    spool = AnalysisSpool(tmp_path / "archive")
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="skills",
+        source_url="https://github.com/tul-sh/skills",
+        registry_rank=None,
+    )
+    (tmp_path / "mirrors" / "tul-sh" / "skills" / ".git").mkdir(parents=True)
+
+    async def fake_analyze_candidate(self, loop, executor, candidate):
+        return candidate, None, "boom"
+
+    monkeypatch.setattr(
+        "skrisk.services.analysis_spool.AnalysisSpoolProducerService._analyze_candidate",
+        fake_analyze_candidate,
+    )
+
+    service = AnalysisSpoolProducerService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+        spool=spool,
+    )
+    summary = await service.run_once(limit_repos=1, workers=1, continuous=False)
+
+    due_after = await repository.list_due_repos()
+
+    assert repo_id not in {row["id"] for row in due_after}
+    assert summary["repos_failed"] == 1
+    assert summary["repos_spooled"] == 0

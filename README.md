@@ -216,7 +216,7 @@ Current defaults:
 
 - SkillsMP still needs ongoing live ingestion work to approach full public coverage because its authenticated API is search-based rather than a bulk export
 - Real source-repo URL resolution still assumes `https://github.com/{publisher}/{repo}` where registry metadata is missing
-- Multiple ingesters are not enabled yet; the current spool runtime still uses one ingester process after the Postgres cutover
+- Multiple `ingest-analysis-spool` processes are safe on Postgres because pending artifacts are now claimed atomically through the file spool before they are persisted
 
 ## Maintainer
 

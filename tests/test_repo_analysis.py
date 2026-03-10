@@ -177,3 +177,62 @@ async def test_run_once_reuses_process_pool_across_continuous_batches(
 
     assert summary["repos_analyzed"] == 2
     assert created_executors == [4]
+
+
+@pytest.mark.asyncio
+async def test_run_once_defers_missing_mirror_repos(tmp_path: Path) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="missing-repo",
+        source_url="https://github.com/tul-sh/missing-repo",
+        registry_rank=None,
+    )
+
+    service = MirroredRepoAnalysisService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+    )
+    summary = await service.run_once(limit_repos=1, workers=1, continuous=False)
+
+    due_after = await repository.list_due_repos()
+
+    assert repo_id not in {row["id"] for row in due_after}
+    assert summary["repos_missing_mirror"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_once_defers_failed_repo_analysis(tmp_path: Path, monkeypatch) -> None:
+    session_factory = create_sqlite_session_factory(f"sqlite+aiosqlite:///{tmp_path / 'skrisk.db'}")
+    await init_db(session_factory)
+    repository = SkillRepository(session_factory)
+
+    repo_id = await repository.upsert_skill_repo(
+        publisher="tul-sh",
+        repo="broken-repo",
+        source_url="https://github.com/tul-sh/broken-repo",
+        registry_rank=None,
+    )
+    (tmp_path / "mirrors" / "tul-sh" / "broken-repo" / ".git").mkdir(parents=True)
+
+    async def fake_analyze_candidate(self, loop, executor, candidate):
+        return candidate, None, "boom"
+
+    monkeypatch.setattr(
+        "skrisk.services.repo_analysis.MirroredRepoAnalysisService._analyze_candidate",
+        fake_analyze_candidate,
+    )
+
+    service = MirroredRepoAnalysisService(
+        session_factory=session_factory,
+        mirror_root=tmp_path / "mirrors",
+    )
+    summary = await service.run_once(limit_repos=1, workers=1, continuous=False)
+
+    due_after = await repository.list_due_repos()
+
+    assert repo_id not in {row["id"] for row in due_after}
+    assert summary["repos_failed"] == 1
