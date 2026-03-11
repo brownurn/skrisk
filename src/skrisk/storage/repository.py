@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 import ipaddress
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import Float, Integer, String, and_, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -284,7 +286,10 @@ class SkillRepository:
         indicator_type: str,
         indicator_value: str,
     ) -> int:
-        normalized_value = _normalize_indicator_value(indicator_type, indicator_value)
+        prepared = _prepare_indicator_value(indicator_type, indicator_value)
+        if prepared is None:
+            raise ValueError(f"Invalid {indicator_type} indicator value")
+        storage_value, normalized_value = prepared
         async with self._session_factory() as session:
             result = await session.execute(
                 select(Indicator).where(
@@ -296,14 +301,14 @@ class SkillRepository:
             if row is None:
                 row = Indicator(
                     indicator_type=indicator_type,
-                    indicator_value=indicator_value.strip(),
+                    indicator_value=storage_value,
                     normalized_value=normalized_value,
                     first_seen_at=datetime.now(UTC),
                     last_seen_at=datetime.now(UTC),
                 )
                 session.add(row)
             else:
-                row.indicator_value = indicator_value.strip()
+                row.indicator_value = storage_value
                 row.last_seen_at = datetime.now(UTC)
 
             await session.commit()
@@ -440,28 +445,29 @@ class SkillRepository:
         if not skill_ids:
             return {}
 
-        latest_snapshot_subquery = (
-            select(
-                SkillSnapshot.skill_id.label("skill_id"),
-                func.max(SkillSnapshot.id).label("snapshot_id"),
-            )
-            .where(SkillSnapshot.skill_id.in_(skill_ids))
-            .group_by(SkillSnapshot.skill_id)
-            .subquery()
-        )
-        result = await session.execute(
-            select(
-                latest_snapshot_subquery.c.skill_id,
-                SkillIndicatorLink.indicator_id,
-            )
-            .join(
-                SkillIndicatorLink,
-                SkillIndicatorLink.skill_snapshot_id == latest_snapshot_subquery.c.snapshot_id,
-            )
-        )
         previous_indicator_ids: dict[int, set[int]] = defaultdict(set)
-        for skill_id, indicator_id in result.all():
-            previous_indicator_ids[int(skill_id)].add(int(indicator_id))
+        for skill_id_chunk in _chunked_values(skill_ids):
+            latest_snapshot_subquery = (
+                select(
+                    SkillSnapshot.skill_id.label("skill_id"),
+                    func.max(SkillSnapshot.id).label("snapshot_id"),
+                )
+                .where(SkillSnapshot.skill_id.in_(skill_id_chunk))
+                .group_by(SkillSnapshot.skill_id)
+                .subquery()
+            )
+            result = await session.execute(
+                select(
+                    latest_snapshot_subquery.c.skill_id,
+                    SkillIndicatorLink.indicator_id,
+                )
+                .join(
+                    SkillIndicatorLink,
+                    SkillIndicatorLink.skill_snapshot_id == latest_snapshot_subquery.c.snapshot_id,
+                )
+            )
+            for skill_id, indicator_id in result.all():
+                previous_indicator_ids[int(skill_id)].add(int(indicator_id))
         return previous_indicator_ids
 
     async def _upsert_indicator_rows(
@@ -476,26 +482,30 @@ class SkillRepository:
 
         for analyzed_skill in analyzed_skills:
             for indicator in analyzed_skill.report.indicators:
-                normalized_value = _normalize_indicator_value(
+                prepared = _prepare_indicator_value(
                     indicator.indicator_type,
                     indicator.indicator_value,
                 )
+                if prepared is None:
+                    continue
+                storage_value, normalized_value = prepared
                 key = (indicator.indicator_type, normalized_value)
-                indicator_values_by_key[key] = indicator.indicator_value.strip()
+                indicator_values_by_key[key] = storage_value
                 normalized_values_by_type[indicator.indicator_type].add(normalized_value)
 
         indicator_rows_by_key: dict[tuple[str, str], Indicator] = {}
         for indicator_type, normalized_values in normalized_values_by_type.items():
             if not normalized_values:
                 continue
-            result = await session.execute(
-                select(Indicator).where(
-                    Indicator.indicator_type == indicator_type,
-                    Indicator.normalized_value.in_(sorted(normalized_values)),
+            for normalized_value_chunk in _chunked_values(sorted(normalized_values)):
+                result = await session.execute(
+                    select(Indicator).where(
+                        Indicator.indicator_type == indicator_type,
+                        Indicator.normalized_value.in_(normalized_value_chunk),
+                    )
                 )
-            )
-            for row in result.scalars().all():
-                indicator_rows_by_key[(row.indicator_type, row.normalized_value)] = row
+                for row in result.scalars().all():
+                    indicator_rows_by_key[(row.indicator_type, row.normalized_value)] = row
 
         for (indicator_type, normalized_value), indicator_value in indicator_values_by_key.items():
             row = indicator_rows_by_key.get((indicator_type, normalized_value))
@@ -525,24 +535,45 @@ class SkillRepository:
         if not indicator_ids:
             return {}
 
-        result = await session.execute(
-            select(IndicatorObservation)
-            .where(IndicatorObservation.indicator_id.in_(indicator_ids))
-            .order_by(IndicatorObservation.id.asc())
-        )
         observations_by_indicator_id: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for observation in result.scalars().all():
-            observations_by_indicator_id[observation.indicator_id].append(
-                {
-                    "id": observation.id,
-                    "source_provider": observation.source_provider,
-                    "source_feed": observation.source_feed,
-                    "classification": observation.classification,
-                    "confidence_label": observation.confidence_label,
-                    "summary": observation.summary,
-                }
+        for indicator_id_chunk in _chunked_values(indicator_ids):
+            result = await session.execute(
+                select(IndicatorObservation)
+                .where(IndicatorObservation.indicator_id.in_(indicator_id_chunk))
+                .order_by(IndicatorObservation.id.asc())
             )
+            for observation in result.scalars().all():
+                observations_by_indicator_id[observation.indicator_id].append(
+                    {
+                        "id": observation.id,
+                        "source_provider": observation.source_provider,
+                        "source_feed": observation.source_feed,
+                        "classification": observation.classification,
+                        "confidence_label": observation.confidence_label,
+                        "summary": observation.summary,
+                    }
+                )
         return observations_by_indicator_id
+
+    async def _load_indicator_enrichments(
+        self,
+        session: AsyncSession,
+        *,
+        indicator_ids: list[int],
+    ) -> dict[int, list[IndicatorEnrichment]]:
+        if not indicator_ids:
+            return {}
+
+        enrichments_by_indicator_id: dict[int, list[IndicatorEnrichment]] = defaultdict(list)
+        for indicator_id_chunk in _chunked_values(indicator_ids):
+            result = await session.execute(
+                select(IndicatorEnrichment)
+                .where(IndicatorEnrichment.indicator_id.in_(indicator_id_chunk))
+                .order_by(IndicatorEnrichment.id.asc())
+            )
+            for enrichment in result.scalars().all():
+                enrichments_by_indicator_id[enrichment.indicator_id].append(enrichment)
+        return enrichments_by_indicator_id
 
     def _collect_vt_candidates(
         self,
@@ -584,16 +615,16 @@ class SkillRepository:
         if not vt_candidates:
             return
 
-        result = await session.execute(
-            select(VTLookupQueueItem).where(
-                VTLookupQueueItem.indicator_id.in_(list(vt_candidates)),
-                VTLookupQueueItem.status.in_(("queued", "running")),
+        existing_rows: dict[int, VTLookupQueueItem] = {}
+        for indicator_id_chunk in _chunked_values(list(vt_candidates)):
+            result = await session.execute(
+                select(VTLookupQueueItem).where(
+                    VTLookupQueueItem.indicator_id.in_(indicator_id_chunk),
+                    VTLookupQueueItem.status.in_(("queued", "running")),
+                )
             )
-        )
-        existing_rows = {
-            row.indicator_id: row
-            for row in result.scalars().all()
-        }
+            for row in result.scalars().all():
+                existing_rows[row.indicator_id] = row
         for indicator_id, candidate in vt_candidates.items():
             row = existing_rows.get(indicator_id)
             if row is None:
@@ -757,7 +788,10 @@ class SkillRepository:
         indicator_type: str,
         indicator_value: str,
     ) -> dict | None:
-        normalized_value = _normalize_indicator_value(indicator_type, indicator_value)
+        prepared = _prepare_indicator_value(indicator_type, indicator_value)
+        if prepared is None:
+            return None
+        _, normalized_value = prepared
         async with self._session_factory() as session:
             indicator_result = await session.execute(
                 select(Indicator).where(
@@ -947,13 +981,18 @@ class SkillRepository:
                 indicator_matches: dict[tuple[str, str], dict[str, Any]] = {}
 
                 for indicator in analyzed_skill.report.indicators:
-                    normalized_value = _normalize_indicator_value(
+                    prepared = _prepare_indicator_value(
                         indicator.indicator_type,
                         indicator.indicator_value,
                     )
-                    indicator_row = indicator_rows_by_key[
+                    if prepared is None:
+                        continue
+                    _, normalized_value = prepared
+                    indicator_row = indicator_rows_by_key.get(
                         (indicator.indicator_type, normalized_value)
-                    ]
+                    )
+                    if indicator_row is None:
+                        continue
                     linked_indicators.append((indicator, indicator_row.id))
                     observations = observations_by_indicator_id.get(indicator_row.id, [])
                     if not observations:
@@ -979,10 +1018,10 @@ class SkillRepository:
                     repo_snapshot_id=repo_snapshot.id,
                     folder_hash=analyzed_skill.folder_hash,
                     version_label=f"{analyzed_checkout.default_branch}@{analyzed_checkout.commit_sha}",
-                    skill_text=analyzed_skill.skill_text,
-                    referenced_files=analyzed_skill.referenced_files,
-                    extracted_domains=analyzed_skill.report.domains,
-                    risk_report=risk_report,
+                    skill_text=_sanitize_storage_text(analyzed_skill.skill_text),
+                    referenced_files=_sanitize_json_value(analyzed_skill.referenced_files),
+                    extracted_domains=_sanitize_json_value(analyzed_skill.report.domains),
+                    risk_report=_sanitize_json_value(risk_report),
                 )
                 session.add(skill_snapshot)
                 await session.flush()
@@ -1107,10 +1146,10 @@ class SkillRepository:
                 repo_snapshot_id=repo_snapshot_id,
                 folder_hash=folder_hash,
                 version_label=version_label,
-                skill_text=skill_text,
-                referenced_files=referenced_files,
-                extracted_domains=extracted_domains,
-                risk_report=risk_report,
+                skill_text=_sanitize_storage_text(skill_text),
+                referenced_files=_sanitize_json_value(referenced_files),
+                extracted_domains=_sanitize_json_value(extracted_domains),
+                risk_report=_sanitize_json_value(risk_report),
             )
             session.add(row)
             await session.flush()
@@ -1489,15 +1528,17 @@ class SkillRepository:
             if not indicator_ids:
                 return []
 
-            enrichment_result = await session.execute(
-                select(IndicatorEnrichment)
-                .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
-                .order_by(IndicatorEnrichment.id.asc())
-            )
             completed_providers_by_indicator: dict[int, set[str]] = defaultdict(set)
-            for enrichment in enrichment_result.scalars().all():
-                if enrichment.status == "completed":
-                    completed_providers_by_indicator[enrichment.indicator_id].add(enrichment.provider)
+            enrichments_by_indicator_id = await self._load_indicator_enrichments(
+                session,
+                indicator_ids=indicator_ids,
+            )
+            for enrichments in enrichments_by_indicator_id.values():
+                for enrichment in enrichments:
+                    if enrichment.status == "completed":
+                        completed_providers_by_indicator[enrichment.indicator_id].add(
+                            enrichment.provider
+                        )
 
             candidates: list[dict[str, Any]] = []
             for (
@@ -2076,22 +2117,22 @@ class SkillRepository:
                 indicator_ids = [indicator.id for _, indicator in link_rows]
                 enrichments_by_indicator: dict[int, list[dict[str, Any]]] = defaultdict(list)
                 if indicator_ids:
-                    enrichment_result = await session.execute(
-                        select(IndicatorEnrichment)
-                        .where(IndicatorEnrichment.indicator_id.in_(indicator_ids))
-                        .order_by(IndicatorEnrichment.id.asc())
+                    raw_enrichments = await self._load_indicator_enrichments(
+                        session,
+                        indicator_ids=indicator_ids,
                     )
-                    for enrichment in enrichment_result.scalars().all():
-                        enrichments_by_indicator[enrichment.indicator_id].append(
-                            {
-                                "provider": enrichment.provider,
-                                "lookup_key": enrichment.lookup_key,
-                                "status": enrichment.status,
-                                "summary": enrichment.summary,
-                                "archive_relative_path": enrichment.archive_relative_path,
-                                "normalized_payload": enrichment.normalized_payload,
-                            }
-                        )
+                    for indicator_id, enrichments in raw_enrichments.items():
+                        for enrichment in enrichments:
+                            enrichments_by_indicator[indicator_id].append(
+                                {
+                                    "provider": enrichment.provider,
+                                    "lookup_key": enrichment.lookup_key,
+                                    "status": enrichment.status,
+                                    "summary": enrichment.summary,
+                                    "archive_relative_path": enrichment.archive_relative_path,
+                                    "normalized_payload": enrichment.normalized_payload,
+                                }
+                            )
                 indicator_links = [
                     {
                         "indicator_id": indicator.id,
@@ -2708,6 +2749,12 @@ _LOW_SIGNAL_HOSTS = {
     "api.github.com",
     "example.com",
 }
+_INDICATOR_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1F\x7F]")
+_URL_PERCENT_ENCODED_CONTROL_RE = re.compile(r"%(?:00|0a|0d|09)", re.IGNORECASE)
+_URL_UNICODE_DOT_SEPARATORS = ("\u3002", "\uff0e", "\uff61")
+_URL_INVALID_NETLOC_MARKERS = ("${", "$(", "`", "<", ">", "{", "}", "[", "]")
+_MAX_URL_INDICATOR_LENGTH = 1800
+_MAX_IN_QUERY_ITEMS = 10000
 
 
 def _is_low_signal_infrastructure_indicator(
@@ -2742,6 +2789,63 @@ def _normalize_indicator_value(indicator_type: str, indicator_value: str) -> str
     if indicator_type in {"domain", "hostname", "ip", "sha256"}:
         return value.lower()
     return value
+
+
+def _prepare_indicator_value(
+    indicator_type: str,
+    indicator_value: str,
+) -> tuple[str, str] | None:
+    storage_value = indicator_value.strip()
+    if not storage_value:
+        return None
+    if _INDICATOR_CONTROL_CHAR_RE.search(storage_value):
+        return None
+
+    if indicator_type == "url":
+        if len(storage_value) > _MAX_URL_INDICATOR_LENGTH:
+            return None
+        if _URL_PERCENT_ENCODED_CONTROL_RE.search(storage_value):
+            return None
+        try:
+            parsed = urlsplit(storage_value)
+        except ValueError:
+            return None
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+            return None
+        if any(marker in parsed.netloc for marker in _URL_INVALID_NETLOC_MARKERS):
+            return None
+        if any(separator in parsed.hostname for separator in _URL_UNICODE_DOT_SEPARATORS):
+            return None
+        return storage_value, storage_value
+
+    lowered = storage_value.lower()
+    if "%" in lowered:
+        return None
+    if any(separator in lowered for separator in _URL_UNICODE_DOT_SEPARATORS):
+        return None
+    if any(marker in lowered for marker in _URL_INVALID_NETLOC_MARKERS):
+        return None
+    return storage_value, _normalize_indicator_value(indicator_type, storage_value)
+
+
+def _sanitize_storage_text(value: str) -> str:
+    return value.replace("\x00", "")
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _sanitize_storage_text(value)
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(_sanitize_json_value(key)): _sanitize_json_value(item) for key, item in value.items()}
+    return value
+
+
+def _chunked_values(values: list[Any], *, chunk_size: int = _MAX_IN_QUERY_ITEMS) -> list[list[Any]]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    return [values[index:index + chunk_size] for index in range(0, len(values), chunk_size)]
 
 
 def _isoformat_datetime(value: datetime | None) -> str | None:

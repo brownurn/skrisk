@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from base64 import b64encode
+import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -202,43 +204,150 @@ class GraphProjectService:
             raise ValueError("session_factory is required to build graph payloads")
 
         skill_rows = await self._repository.list_skills(limit=0)
-        statements: list[dict[str, Any]] = []
-        projected_skills = 0
-        for row in skill_rows:
-            detail = await self._repository.get_skill_detail(
-                publisher=row["publisher"],
-                repo=row["repo"],
-                skill_slug=row["skill_slug"],
-            )
-            if detail is None:
-                continue
-            projected_skills += 1
-            graph = build_skill_graph_payload(detail)
-            statements.extend(_graph_statements(graph))
+        return await self.project_skill_coordinates(skill_rows)
 
-        if not statements:
-            return {"skills_projected": 0}
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                self._transaction_url,
-                headers=self._headers(),
-                json={"statements": statements},
-            )
-            response.raise_for_status()
-        return {"skills_projected": projected_skills}
-
-    async def project_payload(self, graph: dict[str, Any]) -> int:
-        await self.ensure_runtime()
+    async def project_payload(
+        self,
+        graph: dict[str, Any],
+        *,
+        max_statements_per_request: int = 500,
+        client: httpx.AsyncClient | None = None,
+        ensure_runtime: bool = True,
+    ) -> int:
+        if ensure_runtime:
+            await self.ensure_runtime()
         statements = _graph_statements(graph)
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        if not statements:
+            return 0
+
+        owns_client = client is None
+        if owns_client:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+        assert client is not None
+        try:
+            for statement_chunk in _chunked_statements(
+                statements,
+                max_statements_per_request=max_statements_per_request,
+            ):
+                response = await client.post(
+                    self._transaction_url,
+                    headers=self._headers(),
+                    json={"statements": statement_chunk},
+                )
+                response.raise_for_status()
+        finally:
+            if owns_client:
+                await client.aclose()
+        return len(statements)
+
+    async def clear_graph(self) -> None:
+        await self.ensure_runtime()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0)) as client:
             response = await client.post(
                 self._transaction_url,
                 headers=self._headers(),
-                json={"statements": statements},
+                json={"statements": [{"statement": "MATCH (n) DETACH DELETE n"}]},
             )
             response.raise_for_status()
-        return len(statements)
+
+    async def project_skill_coordinates(
+        self,
+        coordinates: list[dict[str, Any]],
+        *,
+        concurrency: int = 8,
+        max_statements_per_request: int = 500,
+        progress_callback: Callable[[dict[str, int | str]], None] | None = None,
+    ) -> dict[str, int]:
+        await self.ensure_runtime()
+        if self._repository is None:
+            raise ValueError("session_factory is required to project skill coordinates")
+        if not coordinates:
+            return {"skills_projected": 0, "skills_failed": 0, "statements_total": 0}
+
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        for coordinate in coordinates:
+            queue.put_nowait(coordinate)
+        worker_count = max(1, min(concurrency, len(coordinates)))
+        for _ in range(worker_count):
+            queue.put_nowait(None)
+
+        stats = {
+            "skills_projected": 0,
+            "skills_failed": 0,
+            "statements_total": 0,
+        }
+        lock = asyncio.Lock()
+
+        async def worker() -> None:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0)) as client:
+                while True:
+                    coordinate = await queue.get()
+                    try:
+                        if coordinate is None:
+                            return
+                        detail = await self._repository.get_skill_detail(
+                            publisher=str(coordinate["publisher"]),
+                            repo=str(coordinate["repo"]),
+                            skill_slug=str(coordinate["skill_slug"]),
+                        )
+                        if detail is None:
+                            async with lock:
+                                stats["skills_failed"] += 1
+                            continue
+                        graph = build_skill_graph_payload(detail)
+                        statement_count = await self.project_payload(
+                            graph,
+                            client=client,
+                            ensure_runtime=False,
+                            max_statements_per_request=max_statements_per_request,
+                        )
+                        async with lock:
+                            stats["skills_projected"] += 1
+                            stats["statements_total"] += statement_count
+                            if progress_callback is not None:
+                                progress_callback(
+                                    {
+                                        "skills_projected": stats["skills_projected"],
+                                        "skills_failed": stats["skills_failed"],
+                                        "statements_total": stats["statements_total"],
+                                        "last_skill": "/".join(
+                                            [
+                                                str(coordinate["publisher"]),
+                                                str(coordinate["repo"]),
+                                                str(coordinate["skill_slug"]),
+                                            ]
+                                        ),
+                                    }
+                                )
+                    except Exception:
+                        async with lock:
+                            stats["skills_failed"] += 1
+                            if progress_callback is not None:
+                                progress_callback(
+                                    {
+                                        "skills_projected": stats["skills_projected"],
+                                        "skills_failed": stats["skills_failed"],
+                                        "statements_total": stats["statements_total"],
+                                        "last_skill": "/".join(
+                                            [
+                                                str(coordinate["publisher"]),
+                                                str(coordinate["repo"]),
+                                                str(coordinate["skill_slug"]),
+                                            ]
+                                        ),
+                                    }
+                                )
+                    finally:
+                        queue.task_done()
+
+        tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        return stats
 
     @property
     def _transaction_url(self) -> str:
@@ -310,3 +419,16 @@ def _graph_statements(graph: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return statements
+
+
+def _chunked_statements(
+    statements: list[dict[str, Any]],
+    *,
+    max_statements_per_request: int,
+) -> list[list[dict[str, Any]]]:
+    if max_statements_per_request <= 0:
+        return [statements]
+    return [
+        statements[index : index + max_statements_per_request]
+        for index in range(0, len(statements), max_statements_per_request)
+    ]

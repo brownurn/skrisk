@@ -437,7 +437,24 @@ def index_search_command(limit: int) -> None:
 
 @cli.command("project-graph")
 @click.option("--limit", default=50, show_default=True, type=click.IntRange(min=1))
-def project_graph_command(limit: int) -> None:
+@click.option("--all/--no-all", "project_all", default=False, show_default=True)
+@click.option("--page-size", default=100, show_default=True, type=click.IntRange(min=1))
+@click.option("--workers", default=8, show_default=True, type=click.IntRange(min=1))
+@click.option(
+    "--statement-batch-size",
+    default=500,
+    show_default=True,
+    type=click.IntRange(min=1),
+)
+@click.option("--reset/--no-reset", default=False, show_default=True)
+def project_graph_command(
+    limit: int,
+    project_all: bool,
+    page_size: int,
+    workers: int,
+    statement_batch_size: int,
+    reset: bool,
+) -> None:
     """Project a bounded batch of skill relationships into Neo4j."""
 
     settings = load_settings()
@@ -446,21 +463,57 @@ def project_graph_command(limit: int) -> None:
         session_factory = create_session_factory(settings.database_url)
         await init_db(session_factory)
         repository = SkillRepository(session_factory)
-        rows = await repository.list_skills(limit=limit, sort="priority")
-        service = GraphProjectService(settings=settings)
+        service = GraphProjectService(settings=settings, session_factory=session_factory)
+
+        if reset:
+            await service.clear_graph()
+            click.echo("Cleared Neo4j graph")
+
         statement_count = 0
         projected_skills = 0
-        for row in rows:
-            detail = await repository.get_skill_detail(
-                publisher=row["publisher"],
-                repo=row["repo"],
-                skill_slug=row["skill_slug"],
+        failed_skills = 0
+
+        if project_all:
+            page = 1
+            while True:
+                rows_page = await repository.list_skills_page(
+                    page=page,
+                    page_size=page_size,
+                    sort="priority",
+                )
+                rows = rows_page["items"]
+                if not rows:
+                    break
+                summary = await service.project_skill_coordinates(
+                    rows,
+                    concurrency=workers,
+                    max_statements_per_request=statement_batch_size,
+                )
+                statement_count += summary["statements_total"]
+                projected_skills += summary["skills_projected"]
+                failed_skills += summary["skills_failed"]
+                click.echo(
+                    f"Page {page}: projected {projected_skills} skills, "
+                    f"failed {failed_skills}, statements {statement_count}, "
+                    f"total {rows_page['total']}"
+                )
+                if not rows_page["has_next"]:
+                    break
+                page += 1
+        else:
+            rows = await repository.list_skills(limit=limit, sort="priority")
+            summary = await service.project_skill_coordinates(
+                rows,
+                concurrency=workers,
+                max_statements_per_request=statement_batch_size,
             )
-            if detail is None:
-                continue
-            statement_count += await service.project_payload(build_skill_graph_payload(detail))
-            projected_skills += 1
-        click.echo(f"Projected {projected_skills} skills into Neo4j with {statement_count} statements")
+            statement_count = summary["statements_total"]
+            projected_skills = summary["skills_projected"]
+            failed_skills = summary["skills_failed"]
+        click.echo(
+            f"Projected {projected_skills} skills into Neo4j with "
+            f"{statement_count} statements (failed={failed_skills})"
+        )
 
     asyncio.run(_run())
 
