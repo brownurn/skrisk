@@ -178,6 +178,16 @@ skrisk index-search --limit 100
 skrisk project-graph --limit 50
 ```
 
+For a full graph rebuild after a large analysis wave, use the offline bulk path instead of the transactional projector:
+
+```bash
+SKRISK_NEO4J_HTTP_PORT=17474 \
+SKRISK_NEO4J_BOLT_PORT=17687 \
+PYTHONPATH=src .venv/bin/skrisk rebuild-graph-bulk --threads 25 --max-off-heap-memory 70%
+```
+
+`project-graph` is still useful for small batches and debugging. `rebuild-graph-bulk` is the intended full-corpus rebuild path.
+
 Current defaults:
 
 - OpenSearch: `http://127.0.0.1:9200`

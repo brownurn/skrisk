@@ -19,6 +19,7 @@ def test_cli_help_lists_operational_commands() -> None:
     assert "enrich-vt" in result.output
     assert "enrich-infra" in result.output
     assert "init-db" in result.output
+    assert "rebuild-graph-bulk" in result.output
     assert "scan-due" in result.output
     assert "seed-registry" in result.output
     assert "sync-intel" in result.output

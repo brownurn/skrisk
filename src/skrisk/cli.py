@@ -20,6 +20,7 @@ from skrisk.services.analysis_spool import (
     AnalysisSpoolProducerService,
 )
 from skrisk.services.db_migrate import DatabaseMigrationService
+from skrisk.services.graph_bulk import GraphBulkImportService, default_bulk_graph_threads
 from skrisk.services.graph_project import GraphProjectService, build_skill_graph_payload
 from skrisk.services.infrastructure_enrichment import InfrastructureEnrichmentService
 from skrisk.services.intel_sync import AbuseChSyncService
@@ -516,6 +517,50 @@ def project_graph_command(
         )
 
     asyncio.run(_run())
+
+
+@cli.command("rebuild-graph-bulk")
+@click.option("--bundle-dir", type=click.Path(path_type=Path, file_okay=False, dir_okay=True))
+@click.option("--threads", type=click.IntRange(min=1))
+@click.option("--max-off-heap-memory", default="70%", show_default=True, type=str)
+@click.option("--export-only/--no-export-only", default=False, show_default=True)
+@click.option("--import-only/--no-import-only", default=False, show_default=True)
+def rebuild_graph_bulk_command(
+    bundle_dir: Path | None,
+    threads: int | None,
+    max_off_heap_memory: str,
+    export_only: bool,
+    import_only: bool,
+) -> None:
+    """Export graph CSVs and rebuild Neo4j via neo4j-admin."""
+
+    settings = load_settings()
+
+    async def _run() -> None:
+        session_factory = create_session_factory(settings.database_url)
+        await init_db(session_factory)
+        settings.archive_root.mkdir(parents=True, exist_ok=True)
+
+        service = GraphBulkImportService(settings=settings)
+        resolved_threads = threads or default_bulk_graph_threads()
+        summary = await service.rebuild(
+            bundle_dir=bundle_dir,
+            threads=resolved_threads,
+            max_off_heap_memory=max_off_heap_memory,
+            export_only=export_only,
+            import_only=import_only,
+        )
+        click.echo(
+            f"Graph bundle ready at {summary['bundle_dir']} "
+            f"(threads={resolved_threads}, files={summary.get('files_written', 'n/a')}, "
+            f"nodes={summary.get('graph_nodes', 'n/a')}, "
+            f"relationships={summary.get('graph_relationships', 'n/a')})"
+        )
+
+    try:
+        asyncio.run(_run())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("sync-intel")
