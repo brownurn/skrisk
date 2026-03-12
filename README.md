@@ -25,6 +25,85 @@ SK Risk is a Melurna risk-intelligence platform for collecting, snapshotting, an
 - Projects canonical skill, repo, registry, and indicator relationships into `Neo4j`
 - Exposes a FastAPI JSON API and a SvelteKit analyst frontend
 
+## Current Status
+
+Current local corpus snapshot on `2026-03-11`:
+
+- `13,665` tracked repos
+- `224,385` canonical skills
+- `50,196` repo snapshots
+- `693,067` skill snapshots
+- `1,961,567` indicators
+- `33,118,678` skill-indicator links
+- `2` registry sources (`skills.sh`, `skillsmp`)
+- `7,030` `skillsmp` source entries
+
+Current projection/runtime snapshot:
+
+- OpenSearch documents: `224,385`
+- Neo4j nodes: `1,510,238`
+- Neo4j relationships: `3,090,083`
+- Neo4j `Skill` nodes: `224,385`
+
+Current local access points:
+
+- analyst UI: `http://127.0.0.1:8080`
+- analyst UI on LAN: `http://192.168.94.13:8080`
+- Postgres: `127.0.0.1:15432`
+- OpenSearch: `127.0.0.1:19200`
+- Neo4j HTTP: `127.0.0.1:17474`
+- Neo4j Bolt: `127.0.0.1:17687`
+
+## Evidence Model
+
+SK Risk now distinguishes between reference content, operational outbound behavior, and true exfiltration.
+
+- `credential_transmission`
+  - observed token or API credential sent to a remote service as part of operational code
+  - example: `Authorization: Bearer $BOCHA_API_KEY`
+- `data_exfiltration`
+  - requires a concrete sensitive source plus an operational remote sink
+  - examples include local secret files, env secrets, or explicit secret variables sent out
+- `reference_example`
+  - documentation or examples are retained as lower-confidence context and should not drive the same severity as operational code
+
+Skill detail pages now include an `Outbound evidence` section that shows:
+
+- what data/token/path was observed
+- how it was transmitted
+- the sink URL/host
+- resolved destination IPs
+- country and ASN context
+- whether any destination is in the `primary cyber concern` set
+
+Current primary-cyber-concern set includes:
+
+- Afghanistan
+- Algeria
+- Belarus
+- China
+- Congo (both Republic of the Congo and Democratic Republic of the Congo)
+- Cuba
+- Haiti
+- Iran
+- Kenya
+- Laos
+- Lebanon
+- Monaco
+- Myanmar
+- Namibia
+- Nigeria
+- North Korea
+- Romania
+- Russia
+- South Sudan
+- Syria
+- Tanzania
+- Ukraine
+- Venezuela
+- Vietnam
+- Yemen
+
 ## Current Commands
 
 ```bash
@@ -221,6 +300,12 @@ Current defaults:
 - [SkillsMP live rollout checkpoint](docs/discussions/2026-03-09-skillsmp-live-rollout.md)
 - [SkillsMP multi-registry design](docs/plans/2026-03-08-skillsmp-multiregistry-design.md)
 - [SkillsMP multi-registry implementation plan](docs/plans/2026-03-08-skillsmp-multiregistry-implementation.md)
+- [AST analysis design](docs/plans/2026-03-09-ast-analysis-design.md)
+- [Postgres runtime scaling](docs/plans/2026-03-09-postgres-runtime-scaling-design.md)
+- [Neo4j bulk import design](docs/plans/2026-03-11-neo4j-bulk-import-design.md)
+- [Exfiltration and country-risk design](docs/plans/2026-03-11-exfil-evidence-country-risk-design.md)
+- [Exfiltration example review](docs/discussions/2026-03-11-exfil-evidence-example-review.md)
+- [Implementation status update](docs/discussions/2026-03-11-implementation-status.md)
 
 ## Current Gaps
 
