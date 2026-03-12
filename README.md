@@ -53,6 +53,8 @@ Current local access points:
 - OpenSearch: `127.0.0.1:19200`
 - Neo4j HTTP: `127.0.0.1:17474`
 - Neo4j Bolt: `127.0.0.1:17687`
+- `mewhois`: `127.0.0.1:18191` via SSH tunnel
+- `meip`: `127.0.0.1:18190` via SSH tunnel
 
 ## Evidence Model
 
@@ -222,6 +224,18 @@ For production Melurna infrastructure, point SK Risk at the shared microservices
 SKRISK_MEWHOIS_URL=http://10.23.94.13:8191
 SKRISK_MEIP_URL=http://10.23.94.13:8190
 ```
+
+In the current local setup, SK Risk does not run `mewhois` or `meip` natively on this machine. It talks to local loopback ports that are SSH-forwarded to the production microservices through the shared jump host:
+
+```bash
+ssh -L 18191:10.23.94.13:8191 -L 18190:10.23.94.13:8190 root@162.254.118.94
+```
+
+That means:
+
+- `http://127.0.0.1:18191` is the local tunnel endpoint for `mewhois`
+- `http://127.0.0.1:18190` is the local tunnel endpoint for `meip`
+- the backing services are hosted behind `162.254.118.94`, not on the SK Risk server itself
 
 ## Search And Graph Runtime
 

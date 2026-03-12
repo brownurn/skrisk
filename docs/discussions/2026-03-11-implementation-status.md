@@ -80,6 +80,15 @@ Current projections:
 - OpenSearch: `127.0.0.1:19200`
 - Neo4j HTTP: `127.0.0.1:17474`
 - Neo4j Bolt: `127.0.0.1:17687`
+- `mewhois`: `127.0.0.1:18191` via SSH tunnel
+- `meip`: `127.0.0.1:18190` via SSH tunnel
+
+Those two local ports are forwarded to the production Melurna microservices through:
+
+- jump host: `root@162.254.118.94`
+- private service endpoints:
+  - `10.23.94.13:8191` for `mewhois`
+  - `10.23.94.13:8190` for `meip`
 
 ## Evidence Model Update
 
