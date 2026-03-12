@@ -29,13 +29,15 @@ _CHARCODE_RE = re.compile(
 )
 _MARKDOWN_FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
 _MARKDOWN_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1F\x7F]")
 _SHELL_ASSIGNMENT_RE = re.compile(
     r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(?:\"([^\"]*)\"|'([^']*)')\s*$",
     re.MULTILINE,
 )
 _BARE_DOMAIN_RE = re.compile(
-    r"(?<![@./A-Za-z0-9_-])((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})(?![A-Za-z0-9_-])"
+    r"(?<![@./%A-Za-z0-9_-])((?:[A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63})(?![A-Za-z0-9_-])"
 )
+_UNICODE_DOT_SEPARATORS = ("\u3002", "\uff0e", "\uff61")
 _FILELIKE_SUFFIXES = {
     "csv",
     "css",
@@ -176,6 +178,12 @@ def is_meaningful_domain_candidate(value: str) -> bool:
 
 def _should_ignore_domain_like_token(value: str) -> bool:
     lowered = value.lower()
+    if _CONTROL_CHAR_RE.search(value):
+        return True
+    if "%" in lowered:
+        return True
+    if any(separator in value for separator in _UNICODE_DOT_SEPARATORS):
+        return True
     if any(token in lowered for token in ("${", "}", "`", "<", ">", "(", ")", "[", "]")):
         return True
     if lowered in _LOW_SIGNAL_HOSTS or lowered.endswith(".localhost"):
@@ -211,9 +219,13 @@ def _should_ignore_domain_context(text: str, start: int, end: int) -> bool:
     suffix = text[end:min(len(text), end + 2)]
     if prefix.endswith("${") or prefix.endswith("}."):
         return True
+    if prefix.endswith("%") or any(prefix.endswith(separator) for separator in _UNICODE_DOT_SEPARATORS):
+        return True
     if prefix.endswith("<") or prefix.endswith("`") or prefix.endswith("--"):
         return True
-    if suffix.startswith(("`", "}", ">")):
+    if suffix.startswith(("`", "}", ">")) or any(
+        suffix.startswith(separator) for separator in _UNICODE_DOT_SEPARATORS
+    ):
         return True
     return False
 
@@ -427,8 +439,10 @@ class _PythonStringCollector(ast.NodeVisitor):
 
 def _extract_python_strings(text: str) -> list[str]:
     try:
-        tree = ast.parse(textwrap.dedent(text))
+        tree = ast.parse(_sanitize_text_for_parser(textwrap.dedent(text)))
     except SyntaxError:
+        return []
+    except UnicodeEncodeError:
         return []
     collector = _PythonStringCollector()
     collector.visit(tree)
@@ -437,7 +451,7 @@ def _extract_python_strings(text: str) -> list[str]:
 
 def _extract_javascript_strings(text: str) -> list[str]:
     try:
-        program = esprima.parseScript(text, tolerant=True)
+        program = esprima.parseScript(_sanitize_text_for_parser(text), tolerant=True)
     except Exception:
         return []
 
@@ -560,6 +574,10 @@ class _JavaScriptStringCollector:
                         return separator.join(target)
             return None
         return None
+
+
+def _sanitize_text_for_parser(text: str) -> str:
+    return text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
 
 
 def _js_callee_name(node) -> str | None:

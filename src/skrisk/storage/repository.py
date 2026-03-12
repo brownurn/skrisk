@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from skrisk.analysis.analyzer import SkillAnalyzer
 from skrisk.analysis import compute_priority_metrics
+from skrisk.policy import evaluate_country_risk
 from skrisk.storage.models import (
     ExternalVerdict,
     Indicator,
@@ -2106,6 +2107,7 @@ class SkillRepository:
             verdicts = verdict_result.scalars().all()
 
             indicator_links: list[dict[str, Any]] = []
+            outbound_evidence: list[dict[str, Any]] = []
             if latest_snapshot is not None:
                 link_result = await session.execute(
                     select(SkillIndicatorLink, Indicator)
@@ -2146,6 +2148,10 @@ class SkillRepository:
                     }
                     for link, indicator in link_rows
                 ]
+                outbound_evidence = _build_outbound_evidence(
+                    risk_report=latest_snapshot.risk_report or {},
+                    indicator_links=indicator_links,
+                )
 
             return {
                 "publisher": publisher,
@@ -2185,6 +2191,7 @@ class SkillRepository:
                     if latest_snapshot is not None
                     else None
                 ),
+                "outbound_evidence": outbound_evidence,
                 "external_verdicts": [
                     {
                         "partner": verdict.partner,
@@ -2739,6 +2746,101 @@ def _registry_source_base_url(source: str | None) -> str:
     if source == "skillsmp":
         return "https://skillsmp.com"
     return ""
+
+
+def _build_outbound_evidence(
+    *,
+    risk_report: dict[str, Any],
+    indicator_links: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence_entries: list[dict[str, Any]] = []
+    findings = risk_report.get("findings") or []
+
+    for finding in findings:
+        if finding.get("category") not in {"data_exfiltration", "credential_transmission"}:
+            continue
+
+        details = finding.get("details") or {}
+        sink_host = str(details.get("sink_host") or "").strip().lower()
+        sink_url = str(details.get("sink_url") or "").strip() or None
+        matched_link = _match_outbound_indicator_link(
+            indicator_links=indicator_links,
+            sink_host=sink_host,
+            sink_url=sink_url,
+        )
+        destinations = _build_outbound_destinations(matched_link)
+        evidence_entries.append(
+            {
+                "path": finding.get("path"),
+                "category": finding.get("category"),
+                "severity": finding.get("severity"),
+                "context": finding.get("context"),
+                "evidence": finding.get("evidence"),
+                "source_kind": details.get("source_kind"),
+                "source_values": list(details.get("source_values") or []),
+                "sink_kind": details.get("sink_kind"),
+                "sink_url": sink_url,
+                "sink_host": sink_host or None,
+                "transport_detail": details.get("transport_detail"),
+                "destinations": destinations,
+                "has_primary_cyber_concern_destination": any(
+                    bool(destination.get("is_primary_cyber_concern"))
+                    for destination in destinations
+                ),
+            }
+        )
+
+    return evidence_entries
+
+
+def _match_outbound_indicator_link(
+    *,
+    indicator_links: list[dict[str, Any]],
+    sink_host: str,
+    sink_url: str | None,
+) -> dict[str, Any] | None:
+    exact_url_link: dict[str, Any] | None = None
+    exact_domain_link: dict[str, Any] | None = None
+
+    for link in indicator_links:
+        indicator_type = link.get("indicator_type")
+        indicator_value = str(link.get("indicator_value") or "")
+        if sink_url and indicator_type == "url" and indicator_value == sink_url:
+            if link.get("enrichments"):
+                return link
+            exact_url_link = link
+        if sink_host and indicator_type == "domain" and indicator_value.lower() == sink_host:
+            if link.get("enrichments"):
+                return link
+            exact_domain_link = link
+    return exact_domain_link or exact_url_link
+
+
+def _build_outbound_destinations(link: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not link:
+        return []
+
+    destinations: list[dict[str, Any]] = []
+    for enrichment in link.get("enrichments") or []:
+        if enrichment.get("provider") != "local_dns" or enrichment.get("status") != "completed":
+            continue
+        payload = enrichment.get("normalized_payload") or {}
+        ip_profiles = payload.get("resolved_ip_profiles") or {}
+        for ip, profile in ip_profiles.items():
+            country = evaluate_country_risk(
+                country_code=profile.get("countryCode"),
+                country_name=profile.get("countryName"),
+            )
+            destinations.append(
+                {
+                    "ip": ip,
+                    "country_code": country["country_code"],
+                    "country_name": country["country_name"],
+                    "asn_name": profile.get("asName"),
+                    "is_primary_cyber_concern": country["is_primary_cyber_concern"],
+                }
+            )
+    return destinations
 
 
 _LOW_SIGNAL_HOSTS = {

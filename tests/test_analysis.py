@@ -52,6 +52,17 @@ def test_analyzer_flags_remote_exec_exfiltration_and_prompt_injection() -> None:
     assert "cli.inference.sh" in report.domains
     assert "exfil.evil" in report.domains
 
+    exfil_finding = next(finding for finding in report.findings if finding.category == "data_exfiltration")
+    assert exfil_finding.details == {
+        "kind": "secret_exfiltration",
+        "source_kind": "env_var",
+        "source_values": ["AWS_SECRET_ACCESS_KEY"],
+        "sink_kind": "curl",
+        "sink_url": "https://exfil.evil/upload",
+        "sink_host": "exfil.evil",
+        "transport_detail": "multipart form upload",
+    }
+
 
 def test_analyzer_keeps_benign_documentation_low_risk() -> None:
     analyzer = SkillAnalyzer()
@@ -97,11 +108,47 @@ def test_analyzer_downgrades_reference_exfiltration_examples() -> None:
         files=files,
     )
 
-    exfil_findings = [finding for finding in report.findings if finding.category == "data_exfiltration"]
+    exfil_findings = [
+        finding for finding in report.findings if finding.category == "credential_transmission"
+    ]
 
-    assert report.severity == "medium"
+    assert report.severity == "none"
     assert exfil_findings
     assert all(finding.severity == "medium" for finding in exfil_findings)
+
+
+def test_analyzer_classifies_authorization_header_api_calls_as_credential_transmission() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "test_api.sh": """
+        source .env
+        RESPONSE=$(curl -s -X POST "https://api.bocha.cn/v1/web-search" \
+          -H "Authorization: Bearer $BOCHA_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "{\"query\": \"$QUERY\", \"count\": 1}")
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="176336109",
+        repo=".openclaw",
+        skill_slug="bocha-web-search",
+        files=files,
+    )
+
+    finding = next(finding for finding in report.findings if finding.category == "credential_transmission")
+
+    assert report.severity == "medium"
+    assert finding.severity == "high"
+    assert finding.details == {
+        "kind": "credential_transmission",
+        "source_kind": "authorization_header",
+        "source_values": ["BOCHA_API_KEY"],
+        "sink_kind": "curl",
+        "sink_url": "https://api.bocha.cn/v1/web-search",
+        "sink_host": "api.bocha.cn",
+        "transport_detail": "Authorization header",
+    }
 
 
 def test_analyzer_caps_router_catalog_skills_with_reference_installers() -> None:
@@ -255,6 +302,74 @@ def test_analyzer_tolerates_markdown_url_labels_that_embed_links() -> None:
     assert ("domain", "example.com") not in extracted
     assert ("url", "https://second.example/path") in extracted
     assert ("domain", "second.example") in extracted
+
+
+def test_analyzer_ignores_overlong_urls_that_are_not_useful_iocs() -> None:
+    analyzer = SkillAnalyzer()
+    long_url = "https://img.shields.io/badge/test?logo=" + ("A" * 3000)
+    files = {
+        "README.md": f"""
+        Badge: {long_url}
+        Real endpoint: https://api.openai.com/v1/responses
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="xiaomacoltai",
+        repo="math-modeling-skill",
+        skill_slug="math-modeling",
+        files=files,
+    )
+
+    extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
+
+    assert ("url", long_url) not in extracted
+    assert ("url", "https://api.openai.com/v1/responses") in extracted
+    assert ("domain", "api.openai.com") in extracted
+
+
+def test_analyzer_ignores_malformed_urls_with_invalid_host_encodings() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "README.md": """
+        Bad: http://127.0.0.1\x00.attacker.com/
+        Bad: http://127.0.0.1%00.attacker.com/
+        Bad: https://target.com。evil.com/path
+        Good: https://api.openai.com/v1/responses
+        """,
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="security",
+        repo="fuzz-corpus",
+        skill_slug="ssrf-examples",
+        files=files,
+    )
+
+    extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
+
+    assert ("url", "http://127.0.0.1\x00.attacker.com/") not in extracted
+    assert ("url", "http://127.0.0.1%00.attacker.com/") not in extracted
+    assert ("url", "https://target.com。evil.com/path") not in extracted
+    assert ("url", "https://api.openai.com/v1/responses") in extracted
+
+
+def test_analyzer_tolerates_unpaired_surrogates_in_python_files() -> None:
+    analyzer = SkillAnalyzer()
+    files = {
+        "script.py": "BASE = 'https://api.example.com'\nBAD = '\\ud800'\nURL = BASE + '/upload'\n",
+    }
+
+    report = analyzer.analyze_skill(
+        publisher="fuzz",
+        repo="unicode-corpus",
+        skill_slug="surrogate-safety",
+        files=files,
+    )
+
+    extracted = {(indicator.indicator_type, indicator.indicator_value) for indicator in report.indicators}
+
+    assert ("url", "https://api.example.com") in extracted
 
 
 def test_analyzer_extracts_bare_domains_and_percent_decoded_urls() -> None:

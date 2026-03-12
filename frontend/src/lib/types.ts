@@ -14,6 +14,8 @@ export interface RiskFinding {
 	category: string;
 	severity: string;
 	evidence: string;
+	context?: string;
+	details?: Record<string, unknown> | null;
 }
 
 export interface IndicatorObservation {
@@ -52,6 +54,7 @@ export interface SkillIndicatorLink {
 	extractionKind?: string | null;
 	rawValue?: string | null;
 	isNewInSnapshot?: boolean;
+	enrichments?: IndicatorEnrichment[];
 }
 
 export interface SkillSnapshot {
@@ -145,6 +148,31 @@ export interface SkillDetail extends SkillSummary {
 	externalVerdicts: ExternalVerdict[];
 	installHistory: InstallHistoryEntry[];
 	sourceEntries: SkillSourceEntry[];
+	outboundEvidence: OutboundEvidence[];
+}
+
+export interface OutboundDestination {
+	ip: string;
+	countryCode?: string | null;
+	countryName?: string | null;
+	asnName?: string | null;
+	isPrimaryCyberConcern: boolean;
+}
+
+export interface OutboundEvidence {
+	path: string;
+	category: string;
+	severity: string;
+	context?: string | null;
+	evidence: string;
+	sourceKind?: string | null;
+	sourceValues: string[];
+	sinkKind?: string | null;
+	sinkUrl?: string | null;
+	sinkHost?: string | null;
+	transportDetail?: string | null;
+	destinations: OutboundDestination[];
+	hasPrimaryCyberConcernDestination: boolean;
 }
 
 export interface FeedArtifact {

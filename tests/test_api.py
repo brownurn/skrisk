@@ -1205,3 +1205,276 @@ async def test_api_summary_endpoints_trim_heavy_snapshot_evidence(tmp_path) -> N
     detail_risk_report = detail_response.json()["latest_snapshot"]["risk_report"]
     assert len(detail_risk_report["indicator_matches"]) == 1
     assert len(detail_risk_report["findings"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_detail_api_surfaces_outbound_evidence_and_country_risk(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'outbound-evidence.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="176336109",
+        repo=".openclaw",
+        source_url="https://github.com/176336109/.openclaw",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="bocha-web-search",
+        title="bocha-web-search",
+        relative_path="skills/bocha-web-search",
+        registry_url="https://skills.sh/176336109/.openclaw/bocha-web-search",
+    )
+    skill_snapshot_id = await repository.record_skill_snapshot(
+        skill_id=skill_id,
+        repo_snapshot_id=repo_snapshot_id,
+        folder_hash="hash-bocha",
+        version_label="main@abc123",
+        skill_text="curl -X POST https://api.bocha.cn/v1/web-search",
+        referenced_files=["test_api.sh"],
+        extracted_domains=["api.bocha.cn"],
+        risk_report={
+            "severity": "medium",
+            "score": 18,
+            "behavior_score": 18,
+            "intel_score": 0,
+            "change_score": 0,
+            "confidence": "likely",
+            "categories": ["credential_transmission"],
+            "domains": ["api.bocha.cn"],
+            "findings": [
+                {
+                    "path": "test_api.sh",
+                    "category": "credential_transmission",
+                    "severity": "high",
+                    "evidence": "RESPONSE=$(curl -s -X POST \"https://api.bocha.cn/v1/web-search\" \\",
+                    "context": "direct_operational",
+                    "details": {
+                        "kind": "credential_transmission",
+                        "source_kind": "authorization_header",
+                        "source_values": ["BOCHA_API_KEY"],
+                        "sink_kind": "curl",
+                        "sink_url": "https://api.bocha.cn/v1/web-search",
+                        "sink_host": "api.bocha.cn",
+                        "transport_detail": "Authorization header",
+                    },
+                }
+            ],
+            "indicator_matches": [],
+        },
+    )
+    domain_indicator_id = await repository.upsert_indicator("domain", "api.bocha.cn")
+    await repository.record_skill_indicator_link(
+        skill_snapshot_id=skill_snapshot_id,
+        indicator_id=domain_indicator_id,
+        source_path="test_api.sh",
+        extraction_kind="url-host",
+        raw_value="https://api.bocha.cn/v1/web-search",
+        is_new_in_snapshot=True,
+    )
+    await repository.record_indicator_enrichment(
+        indicator_id=domain_indicator_id,
+        provider="local_dns",
+        lookup_key="api.bocha.cn",
+        status="completed",
+        summary="resolved_ips=123.57.128.210",
+        archive_relative_path=None,
+        normalized_payload={
+            "host": "api.bocha.cn",
+            "resolved_ips": ["123.57.128.210"],
+            "resolved_ip_profiles": {
+                "123.57.128.210": {
+                    "ip": "123.57.128.210",
+                    "countryCode": "CN",
+                    "countryName": "China",
+                    "asName": "Hangzhou Alibaba Advertising Co.,Ltd.",
+                }
+            },
+        },
+        requested_at=datetime(2026, 3, 11, 8, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 3, 11, 8, 0, tzinfo=UTC),
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/skills/176336109/.openclaw/bocha-web-search")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["outbound_evidence"] == [
+        {
+            "path": "test_api.sh",
+            "category": "credential_transmission",
+            "severity": "high",
+            "context": "direct_operational",
+            "evidence": 'RESPONSE=$(curl -s -X POST "https://api.bocha.cn/v1/web-search" \\',
+            "source_kind": "authorization_header",
+            "source_values": ["BOCHA_API_KEY"],
+            "sink_kind": "curl",
+            "sink_url": "https://api.bocha.cn/v1/web-search",
+            "sink_host": "api.bocha.cn",
+            "transport_detail": "Authorization header",
+            "destinations": [
+                {
+                    "ip": "123.57.128.210",
+                    "country_code": "CN",
+                    "country_name": "China",
+                    "asn_name": "Hangzhou Alibaba Advertising Co.,Ltd.",
+                    "is_primary_cyber_concern": True,
+                }
+            ],
+            "has_primary_cyber_concern_destination": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skill_detail_api_prefers_enriched_domain_link_for_outbound_evidence(tmp_path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'outbound-evidence-prefer-domain.db'}"
+    session_factory = create_sqlite_session_factory(database_url)
+    await init_db(session_factory)
+
+    repository = SkillRepository(session_factory)
+    repo_id = await repository.upsert_skill_repo(
+        publisher="176336109",
+        repo=".openclaw",
+        source_url="https://github.com/176336109/.openclaw",
+        registry_rank=1,
+    )
+    repo_snapshot_id = await repository.record_repo_snapshot(
+        repo_id=repo_id,
+        commit_sha="abc123",
+        default_branch="main",
+        discovered_skill_count=1,
+    )
+    skill_id = await repository.upsert_skill(
+        repo_id=repo_id,
+        skill_slug="bocha-web-search",
+        title="bocha-web-search",
+        relative_path="skills/bocha-web-search",
+        registry_url="https://skills.sh/176336109/.openclaw/bocha-web-search",
+    )
+    skill_snapshot_id = await repository.record_skill_snapshot(
+        skill_id=skill_id,
+        repo_snapshot_id=repo_snapshot_id,
+        folder_hash="hash-bocha",
+        version_label="main@abc123",
+        skill_text="curl -X POST https://api.bocha.cn/v1/web-search",
+        referenced_files=["test_api.sh"],
+        extracted_domains=["api.bocha.cn"],
+        risk_report={
+            "severity": "medium",
+            "score": 18,
+            "behavior_score": 18,
+            "intel_score": 0,
+            "change_score": 0,
+            "confidence": "likely",
+            "categories": ["credential_transmission"],
+            "domains": ["api.bocha.cn"],
+            "findings": [
+                {
+                    "path": "test_api.sh",
+                    "category": "credential_transmission",
+                    "severity": "high",
+                    "evidence": "curl -X POST https://api.bocha.cn/v1/web-search",
+                    "context": "direct_operational",
+                    "details": {
+                        "kind": "credential_transmission",
+                        "source_kind": "authorization_header",
+                        "source_values": ["BOCHA_API_KEY"],
+                        "sink_kind": "curl",
+                        "sink_url": "https://api.bocha.cn/v1/web-search",
+                        "sink_host": "api.bocha.cn",
+                        "transport_detail": "Authorization header",
+                    },
+                }
+            ],
+            "indicator_matches": [],
+        },
+    )
+    url_indicator_id = await repository.upsert_indicator("url", "https://api.bocha.cn/v1/web-search")
+    domain_indicator_id = await repository.upsert_indicator("domain", "api.bocha.cn")
+    await repository.record_skill_indicator_link(
+        skill_snapshot_id=skill_snapshot_id,
+        indicator_id=url_indicator_id,
+        source_path="test_api.sh",
+        extraction_kind="inline-url",
+        raw_value="https://api.bocha.cn/v1/web-search",
+        is_new_in_snapshot=True,
+    )
+    await repository.record_skill_indicator_link(
+        skill_snapshot_id=skill_snapshot_id,
+        indicator_id=domain_indicator_id,
+        source_path="test_api.sh",
+        extraction_kind="url-host",
+        raw_value="https://api.bocha.cn/v1/web-search",
+        is_new_in_snapshot=True,
+    )
+    await repository.record_indicator_enrichment(
+        indicator_id=domain_indicator_id,
+        provider="local_dns",
+        lookup_key="api.bocha.cn",
+        status="completed",
+        summary="resolved_ips=123.57.128.210,8.147.108.53",
+        archive_relative_path=None,
+        normalized_payload={
+            "host": "api.bocha.cn",
+            "resolved_ips": ["123.57.128.210", "8.147.108.53"],
+            "resolved_ip_profiles": {
+                "123.57.128.210": {
+                    "ip": "123.57.128.210",
+                    "countryCode": "CN",
+                    "countryName": "China",
+                    "asName": "Hangzhou Alibaba Advertising Co.,Ltd.",
+                },
+                "8.147.108.53": {
+                    "ip": "8.147.108.53",
+                    "countryCode": "CN",
+                    "countryName": "China",
+                    "asName": "Hangzhou Alibaba Advertising Co.,Ltd.",
+                },
+            },
+        },
+        requested_at=datetime(2026, 3, 11, 8, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 3, 11, 8, 0, tzinfo=UTC),
+    )
+
+    app = create_app(session_factory)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/skills/176336109/.openclaw/bocha-web-search")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["outbound_evidence"][0]["destinations"] == [
+        {
+            "ip": "123.57.128.210",
+            "country_code": "CN",
+            "country_name": "China",
+            "asn_name": "Hangzhou Alibaba Advertising Co.,Ltd.",
+            "is_primary_cyber_concern": True,
+        },
+        {
+            "ip": "8.147.108.53",
+            "country_code": "CN",
+            "country_name": "China",
+            "asn_name": "Hangzhou Alibaba Advertising Co.,Ltd.",
+            "is_primary_cyber_concern": True,
+        },
+    ]
+    assert payload["outbound_evidence"][0]["has_primary_cyber_concern_destination"] is True

@@ -13,7 +13,14 @@
 		priorityTone,
 		severityTone
 	} from '$lib/presenters';
-	import type { IndicatorMatch, IndicatorObservation, RiskFinding, SkillDetail, SkillIndicatorLink } from '$lib/types';
+	import type {
+		IndicatorMatch,
+		IndicatorObservation,
+		OutboundEvidence,
+		RiskFinding,
+		SkillDetail,
+		SkillIndicatorLink
+	} from '$lib/types';
 
 	let { data } = $props<{ data: { skill: SkillDetail } }>();
 
@@ -31,6 +38,7 @@
 			isPositiveIndicatorMatch(match)
 		)
 	);
+	const outboundEvidence = $derived(data.skill.outboundEvidence ?? []);
 	const observedInfrastructure = $derived.by(() => {
 		const seen = new Set<string>();
 		const resolved: SkillIndicatorLink[] = [];
@@ -113,6 +121,23 @@
 
 	function infrastructureContext(link: SkillIndicatorLink): string {
 		return [link.extractionKind, link.sourcePath].filter(Boolean).join(' · ') || 'Observed in latest snapshot';
+	}
+
+	function outboundSourceLabel(entry: OutboundEvidence): string {
+		if (entry.sourceValues.length > 0) {
+			return entry.sourceValues.join(', ');
+		}
+		return entry.sourceKind ?? 'Unspecified source';
+	}
+
+	function outboundDestinationLabel(entry: OutboundEvidence): string {
+		if (entry.sinkHost) {
+			return entry.sinkHost;
+		}
+		if (entry.sinkUrl) {
+			return entry.sinkUrl;
+		}
+		return 'Unspecified sink';
 	}
 </script>
 
@@ -296,6 +321,48 @@
 	</div>
 
 	<div class="panel stack">
+		<div class="definition-card">
+			<h3>Outbound evidence</h3>
+			{#if outboundEvidence.length > 0}
+				<ul class="evidence-list">
+					{#each outboundEvidence as entry}
+						<li>
+							<strong>{titleizeCategory(entry.category)}</strong>
+							<span>{entry.evidence}</span>
+							<span class="muted">Observed data: {outboundSourceLabel(entry)}</span>
+							<span class="muted">
+								Sink: {outboundDestinationLabel(entry)}
+								{#if entry.transportDetail}
+									· {entry.transportDetail}
+								{/if}
+							</span>
+							{#if entry.destinations.length > 0}
+								<div class="token-list">
+									{#each entry.destinations as destination}
+										<span class="token mono">
+											{destination.ip}
+											{#if destination.countryName}
+												· {destination.countryName}
+											{/if}
+											{#if destination.isPrimaryCyberConcern}
+												· Primary cyber concern
+											{/if}
+										</span>
+									{/each}
+								</div>
+							{:else}
+								<span class="muted">No resolved destination IP profile recorded yet.</span>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="muted">
+					No concrete outbound evidence chain was recorded on the latest snapshot.
+				</p>
+			{/if}
+		</div>
+
 		<div class="definition-card">
 			<h3>Observed infrastructure</h3>
 			{#if observedInfrastructure.length > 0}

@@ -10,6 +10,7 @@ import type {
 	IndicatorSummary,
 	InstallHistoryEntry,
 	LinkedSkill,
+	OutboundEvidence,
 	OverviewData,
 	RepoDetail,
 	RiskFinding,
@@ -89,7 +90,12 @@ function normalizeRiskFinding(raw: Record<string, unknown>): RiskFinding {
 		path: String(raw.path ?? ''),
 		category: String(raw.category ?? ''),
 		severity: String(raw.severity ?? ''),
-		evidence: String(raw.evidence ?? '')
+		evidence: String(raw.evidence ?? ''),
+		context: raw.context ? String(raw.context) : undefined,
+		details:
+			raw.details && typeof raw.details === 'object'
+				? (raw.details as Record<string, unknown>)
+				: null
 	};
 }
 
@@ -141,7 +147,44 @@ function normalizeSkillIndicatorLink(raw: Record<string, unknown>): SkillIndicat
 		sourcePath: raw.source_path ? String(raw.source_path) : null,
 		extractionKind: raw.extraction_kind ? String(raw.extraction_kind) : null,
 		rawValue: raw.raw_value ? String(raw.raw_value) : null,
-		isNewInSnapshot: Boolean(raw.is_new_in_snapshot)
+		isNewInSnapshot: Boolean(raw.is_new_in_snapshot),
+		enrichments: Array.isArray(raw.enrichments)
+			? raw.enrichments.map((item) => normalizeEnrichment(item as Record<string, unknown>))
+			: []
+	};
+}
+
+function normalizeOutboundEvidence(raw: Record<string, unknown>): OutboundEvidence {
+	return {
+		path: String(raw.path ?? ''),
+		category: String(raw.category ?? ''),
+		severity: String(raw.severity ?? ''),
+		context: raw.context ? String(raw.context) : null,
+		evidence: String(raw.evidence ?? ''),
+		sourceKind: raw.source_kind ? String(raw.source_kind) : null,
+		sourceValues: Array.isArray(raw.source_values) ? raw.source_values.map(String) : [],
+		sinkKind: raw.sink_kind ? String(raw.sink_kind) : null,
+		sinkUrl: raw.sink_url ? String(raw.sink_url) : null,
+		sinkHost: raw.sink_host ? String(raw.sink_host) : null,
+		transportDetail: raw.transport_detail ? String(raw.transport_detail) : null,
+		destinations: Array.isArray(raw.destinations)
+			? raw.destinations.map((item) => ({
+					ip: String((item as Record<string, unknown>).ip ?? ''),
+					countryCode: (item as Record<string, unknown>).country_code
+						? String((item as Record<string, unknown>).country_code)
+						: null,
+					countryName: (item as Record<string, unknown>).country_name
+						? String((item as Record<string, unknown>).country_name)
+						: null,
+					asnName: (item as Record<string, unknown>).asn_name
+						? String((item as Record<string, unknown>).asn_name)
+						: null,
+					isPrimaryCyberConcern: Boolean(
+						(item as Record<string, unknown>).is_primary_cyber_concern
+					)
+				}))
+			: [],
+		hasPrimaryCyberConcernDestination: Boolean(raw.has_primary_cyber_concern_destination)
 	};
 }
 
@@ -475,6 +518,9 @@ export async function loadSkillDetail(
 			: [],
 		sourceEntries: Array.isArray(raw.source_entries)
 			? raw.source_entries.map((item) => normalizeSourceEntry(item as Record<string, unknown>))
+			: [],
+		outboundEvidence: Array.isArray(raw.outbound_evidence)
+			? raw.outbound_evidence.map((item) => normalizeOutboundEvidence(item as Record<string, unknown>))
 			: []
 	};
 }
